@@ -1,6 +1,7 @@
 """Unity AB build execution adapted from the existing asset_builder workflow."""
 
 import json
+import hashlib
 import html
 import re
 import shutil
@@ -10,7 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from agent.git import file_changed, run_git, sync_branch
+from agent.git import run_git, sync_branch
 from agent.process import close_unity_for_project
 
 
@@ -80,20 +81,22 @@ class BuildExecutor:
             current_stage = "git"
             self._wait_before_next_stage()
             self._event(task_id, "status", sequence, stage=current_stage, message="syncing branch")
-            _, old_sha = run_git(project["path"], "rev-parse", "HEAD")
             sha = sync_branch(project["path"], task["branch"], lambda line: self._important_log(task_id, sequence, "git", line))
             self._event(task_id, "status", sequence, stage="git", commit_sha=sha, message=f"checked out {sha}")
-            required_file = "Assets/Bundles/CSharp/AheadOfScript_Assembly/AheadOfScript_Assembly.bytes"
-            if not Path(project["path"], required_file).is_file() or not file_changed(project["path"], old_sha.strip(), sha, required_file):
-                raise RuntimeError(f"required Git file was not updated: {required_file}")
-            self._event(task_id, "log", sequence, stage="git", message=f"required file updated: {required_file}")
             current_stage = "xlua"
             self._wait_before_next_stage()
             self._clear_xlua_gen(project["path"], task_id, sequence)
             self._invoke_unity(task_id, project, "HLS_Editor.ExportEditor.ResetXLua", sequence, cancel_event=cancel_event, stage=current_stage)
             current_stage = "ab"
             self._wait_before_next_stage()
+            required_file = "Assets/Bundles/CSharp/AheadOfScript_Assembly/AheadOfScript_Assembly.bytes"
+            before_ab_hash = self._file_sha256(project["path"], required_file)
             self._invoke_unity(task_id, project, channel["build_method"], sequence, self._agent_type(channel), cancel_event, current_stage)
+            # AB generation must produce a new AheadOfScript assembly after the build method completes.
+            after_ab_hash = self._file_sha256(project["path"], required_file)
+            if after_ab_hash is None or after_ab_hash == before_ab_hash:
+                raise RuntimeError(f"required Git file was not changed by AB generation: {required_file}")
+            self._event(task_id, "log", sequence, stage="ab", message=f"required file changed after AB generation: {required_file}")
             self._event(task_id, "status", sequence, status="success", stage="ab", commit_sha=sha, message="build complete")
         except Exception as error:
             status = "cancelled" if cancel_event and cancel_event.is_set() else "failed"
@@ -106,6 +109,17 @@ class BuildExecutor:
     def _wait_before_next_stage(self) -> None:
         """Leave a short visible gap between successful pipeline stages."""
         time.sleep(1)
+
+    def _file_sha256(self, project_path: str, relative_path: str) -> str | None:
+        """Return a generated file hash so AB output changes can be verified by content."""
+        path = Path(project_path) / relative_path
+        if not path.is_file():
+            return None
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     def _clear_xlua_gen(self, project_path: str, task_id: str, sequence: list[int]) -> None:
         """Clear only the generated XLua directory before Unity regenerates it."""
