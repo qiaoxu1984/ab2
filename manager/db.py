@@ -9,7 +9,7 @@ from typing import Any
 
 
 class Database:
-    """Persist agents, tasks, logs, and active project locks in SQLite."""
+    """Persist tasks, logs, reports, and build artifacts in SQLite."""
 
     def __init__(self, path: str):
         """Open the database and create the schema needed by the service."""
@@ -23,12 +23,7 @@ class Database:
         with self.lock, self.connection:
             self.connection.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS agents (
-                    id TEXT PRIMARY KEY, name TEXT NOT NULL, platform TEXT NOT NULL,
-                    hostname TEXT NOT NULL, unity_version TEXT NOT NULL DEFAULT '',
-                    version TEXT NOT NULL DEFAULT '', projects_json TEXT NOT NULL,
-                    last_seen REAL NOT NULL
-                );
+                DROP TABLE IF EXISTS agents;
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, project_id TEXT NOT NULL,
                     channel TEXT NOT NULL, branch TEXT NOT NULL, status TEXT NOT NULL,
@@ -56,27 +51,6 @@ class Database:
             columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(tasks)").fetchall()}
             if "phase_times_json" not in columns:
                 self.connection.execute("ALTER TABLE tasks ADD COLUMN phase_times_json TEXT NOT NULL DEFAULT '{}'")
-
-    def save_agent(self, info: dict[str, Any]) -> None:
-        """Upsert an Agent heartbeat and its latest project configuration."""
-        with self.lock, self.connection:
-            self.connection.execute(
-                """INSERT INTO agents VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET name=excluded.name,
-                   platform=excluded.platform, hostname=excluded.hostname,
-                   unity_version=excluded.unity_version, version=excluded.version,
-                   projects_json=excluded.projects_json, last_seen=excluded.last_seen""",
-                (info["id"], info["name"], info["platform"], info["hostname"],
-                 info.get("unity_version", ""), info.get("version", ""),
-                 json.dumps(info.get("projects", [])), time.time()),
-            )
-
-    def list_agents(self) -> list[dict[str, Any]]:
-        """Return agents with an online flag derived from the heartbeat timeout."""
-        with self.lock:
-            rows = self.connection.execute("SELECT * FROM agents ORDER BY name").fetchall()
-        return [{**dict(row), "projects": json.loads(row["projects_json"]),
-                 "online": time.time() - row["last_seen"] < 15} for row in rows]
 
     def create_task(self, request: dict[str, str]) -> str:
         """Atomically create a task unless its Agent/project already runs one."""

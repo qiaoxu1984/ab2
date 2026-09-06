@@ -25,18 +25,24 @@ function setChannelAction(key, running) {
 }
 
 async function loadAgents() {
-  /* Render one build card for every Agent project channel. */
+  /* Render channels inside one collapsible group per machine. */
   const agents = await fetch('/api/agents').then(response => response.json());
-  document.querySelector('#agents').innerHTML = agents.map(agent => agent.projects.map(project => (project.channels || []).map((channel, index) => {
-    const key = ('p_' + agent.id + '_' + project.id + '_' + (channel.name || channel.switch_to || index)).replace(/[^A-Za-z0-9_-]/g, '_');
-    const channelName = channel.name || channel.switch_to;
-    const branches = (project.channel_branches || {})[channelName] || [];
-    const usesDefaultBranch = channel.branch_filter === 'default';
-    const saved = localStorage.getItem(branchKey(key));
-    const selected = usesDefaultBranch ? (project.default_branch || branches[0] || '') : (branches.includes(saved) ? saved : (branches[0] || ''));
-    projectData[key] = { ...(projectData[key] || {}), agent_id: agent.id, project_id: project.id, channel: channelName, branch_filter: channel.branch_filter || 'all_dev', default_branch: project.default_branch || '' };
-    return `<div class="channel-card"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="machine-meta">机器：${esc(agent.name)} · ${agent.online ? '在线' : '离线'} · ${esc(agent.platform)} · ${esc(agent.hostname)}</div><div class="channel-actions"><select id="branch-${key}" onchange="rememberBranch('${key}',this.value)" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
-  })).flat(2)).join('') || '暂无已配置渠道';
+  // Remove stale channel references when an Agent or project disappears from the live snapshot.
+  Object.keys(projectData).forEach(key => delete projectData[key]);
+  // The API contains only live connections, so every rendered machine is currently online.
+  document.querySelector('#agents').innerHTML = agents.map(agent => {
+    const cards = agent.projects.map(project => (project.channels || []).map((channel, index) => {
+      const key = ('p_' + agent.id + '_' + project.id + '_' + (channel.name || channel.switch_to || index)).replace(/[^A-Za-z0-9_-]/g, '_');
+      const channelName = channel.name || channel.switch_to;
+      const branches = (project.channel_branches || {})[channelName] || [];
+      const usesDefaultBranch = channel.branch_filter === 'default';
+      const saved = localStorage.getItem(branchKey(key));
+      const selected = usesDefaultBranch ? (project.default_branch || branches[0] || '') : (branches.includes(saved) ? saved : (branches[0] || ''));
+      projectData[key] = { ...(projectData[key] || {}), agent_id: agent.id, project_id: project.id, channel: channelName, branch_filter: channel.branch_filter || 'all_dev', default_branch: project.default_branch || '' };
+      return `<div class="channel-card"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="channel-actions"><select id="branch-${key}" onchange="rememberBranch('${key}',this.value)" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
+    })).flat(2).join('');
+    return `<details class="machine-group online" open><summary><span class="machine-name">${esc(agent.name)}</span><span class="machine-status">在线</span><span class="machine-meta">${esc(agent.hostname)} · ${esc(agent.platform)}</span></summary><div class="machine-channels">${cards || '暂无已配置渠道'}</div></details>`;
+  }).join('') || '暂无已配置渠道';
   restoreLatestTasks();
 }
 
@@ -157,4 +163,6 @@ async function openAiReport(taskId) {
 
 document.querySelector('#refresh').onclick = loadAgents;
 loadAgents();
+// Refresh live Agent and project membership independently from task polling.
+setInterval(loadAgents, 5000);
 setInterval(loadTask, 2000);

@@ -33,7 +33,7 @@ class ConfigRequest(BaseModel):
 
 
 class ManagerState:
-    """Own in-memory sockets while durable state remains in SQLite."""
+    """Own live Agent sockets while durable task state remains in SQLite."""
 
     def __init__(self) -> None:
         """Create the database and connection registry for this process."""
@@ -50,6 +50,13 @@ class ManagerState:
             raise HTTPException(status_code=409, detail="agent is offline")
         await connection.socket.send_json(payload)
 
+    def live_agents(self) -> list[dict[str, Any]]:
+        """Return only Agent data from currently connected WebSocket sessions."""
+        return sorted(
+            [{**connection.info, "online": True} for connection in self.connections.values()],
+            key=lambda item: str(item.get("name", "")),
+        )
+
 
 state = ManagerState()
 app = FastAPI(title="AB2 Build Manager")
@@ -58,8 +65,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 @app.get("/api/agents")
 async def agents() -> list[dict[str, Any]]:
-    """Return all registered Agents and their configured projects."""
-    return state.db.list_agents()
+    """Return only currently connected Agents and their latest project configuration."""
+    return state.live_agents()
 
 
 @app.post("/api/projects")
@@ -74,7 +81,7 @@ async def create_task(request: BuildRequest) -> dict[str, str]:
     """Create and dispatch one task while enforcing per-project exclusivity."""
     payload = request.model_dump()
     if not payload["channel"]:
-        agent = next((item for item in state.db.list_agents() if item["id"] == request.agent_id), None)
+        agent = next((item for item in state.live_agents() if item["id"] == request.agent_id), None)
         project = next((item for item in (agent or {}).get("projects", []) if item.get("id") == request.project_id), None)
         payload["channel"] = ((project or {}).get("channels") or [{}])[0].get("name", "")
     if not payload["channel"]:
@@ -146,25 +153,26 @@ async def agent_socket(socket: WebSocket) -> None:
     """Accept Agent registration, heartbeat, and task event messages."""
     await socket.accept()
     agent_id = ""
+    connection = AgentConnection(socket)
     try:
         while True:
             data = await socket.receive_json()
             if data.get("type") in ("register", "heartbeat"):
                 agent = dict(data["agent"])
                 agent_id = agent["id"]
-                for existing in state.db.list_agents():
+                for existing in state.live_agents():
                     if existing["id"] == agent_id and existing["hostname"] != agent["hostname"]:
                         agent_id = f"{agent_id}-{agent['hostname']}"
                         break
                 agent["id"] = agent_id
-                state.connections[agent_id] = connection = AgentConnection(socket)
+                # A heartbeat replaces the live snapshot without writing Agent data to disk.
                 connection.info = agent
-                state.db.save_agent(agent)
+                state.connections[agent_id] = connection
                 await socket.send_json(message("registered", server_time=time.time()))
             elif data.get("type") == "event":
                 state.db.apply_event(data["event"])
     except WebSocketDisconnect:
-        if agent_id:
+        if agent_id and state.connections.get(agent_id) is connection:
             state.connections.pop(agent_id, None)
 
 
