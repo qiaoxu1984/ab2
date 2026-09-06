@@ -27,8 +27,8 @@ class AgentConfig:
             # Allow a channel to lock builds to the project's configured default branch.
             if channel.get("branch_filter", "all_dev") not in ("default", "all_dev", "all_feature", "month_dev", "month_feature"):
                 raise ValueError("invalid branch filter")
-            if channel.get("platform") not in ("Android", "iOS", "HarmonyOS"):
-                raise ValueError("channel platform must be detected as Android, iOS, or HarmonyOS")
+            if channel.get("platform") not in ("Android", "iOS", "OpenHarmony", "HarmonyOS"):
+                raise ValueError("channel platform must be detected as Android, iOS, or OpenHarmony")
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", channel.get("build_method", "")):
                 raise ValueError("invalid Unity build method")
         project_ids = [item.get("id") for item in self.data["projects"]]
