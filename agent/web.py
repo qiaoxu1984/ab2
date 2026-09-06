@@ -58,17 +58,19 @@ class AgentWebHandler(BaseHTTPRequestHandler):
             # Keep generated Unity logs in the project root for easy inspection.
             project["log_path"] = str(Path(project.get("path", "")) / "Log" / "AB2-build.log")
             project["unity_path"] = self._find_unity(project.get("unity_version", "")) or project.get("unity_path", "")
-            project["engine"] = "团结引擎" if "tuanjie" in project.get("unity_path", "").lower() else "Unity"
+            project["engine"] = "Tuanjie" if "tuanjie" in project.get("unity_path", "").lower() else "Unity"
             detected = self._detect_platforms(Path(project.get("path", "")))
             project["platforms"] = detected
             for channel in project.get("channels", []):
-                if channel.get("platform") == "HarmonyOS" and channel.get("switch_to", "").startswith("harmony_"):
+                if channel.get("platform") in ("HarmonyOS", "OpenHarmony"):
+                    channel["platform"] = "OpenHarmony"
+                if channel.get("platform") == "OpenHarmony" and channel.get("switch_to", "").startswith("harmony_"):
                     channel["switch_to"] = "openharmony_" + channel["switch_to"].split("_", 1)[1]
                     channel["name"] = channel["switch_to"]
                 if channel.get("platform") not in detected:
                     switch_to = channel.get("switch_to", "")
                     prefix = switch_to.split("_", 1)[0] if "_" in switch_to else ""
-                    channel["platform"] = {"android": "Android", "ios": "iOS", "harmony": "HarmonyOS"}.get(prefix, detected[0])
+                    channel["platform"] = {"android": "Android", "ios": "iOS", "harmony": "OpenHarmony", "openharmony": "OpenHarmony"}.get(prefix, detected[0])
         return result
 
     def _query_value(self, key: str) -> str:
@@ -112,13 +114,13 @@ class AgentWebHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
         engine_path = self._find_unity(version)
-        return {"id": path.name.lower().replace(" ", "-"), "name": path.name, "path": str(path), "unity_version": version, "engine": "团结引擎" if engine_path and "tuanjie" in engine_path.lower() else "Unity", "platforms": self._detect_platforms(path), "unity_path": engine_path, "log_path": str(path / "Log" / "AB2-build.log"), "default_branch": branch, "channels": []}
+        return {"id": path.name.lower().replace(" ", "-"), "name": path.name, "path": str(path), "unity_version": version, "engine": "Tuanjie" if engine_path and "tuanjie" in engine_path.lower() else "Unity", "platforms": self._detect_platforms(path), "unity_path": engine_path, "log_path": str(path / "Log" / "AB2-build.log"), "default_branch": branch, "channels": []}
 
     def _detect_platforms(self, project_path: Path) -> list[str]:
         """Read project settings and package metadata to determine configured platforms."""
         cache_root = project_path / "Library" / "PlayerDataCache"
-        cache_candidates = {"Android": cache_root / "Android", "iOS": cache_root / "iOS", "HarmonyOS": cache_root / "HarmonyOS"}
-        existing = [(name, path.stat().st_mtime) for name, path in cache_candidates.items() if path.is_dir()]
+        cache_candidates = [("Android", cache_root / "Android"), ("iOS", cache_root / "iOS"), ("OpenHarmony", cache_root / "OpenHarmony"), ("OpenHarmony", cache_root / "HarmonyOS")]
+        existing = [(name, path.stat().st_mtime) for name, path in cache_candidates if path.is_dir()]
         if existing:
             # The newest platform cache is Unity's most recently used build target.
             return [max(existing, key=lambda item: item[1])[0]]
@@ -129,8 +131,8 @@ class AgentWebHandler(BaseHTTPRequestHandler):
             platforms.append("Android")
         if "iphone" in content or "ios" in content or "com.unity.mobile.ios" in content:
             platforms.append("iOS")
-        if "harmony" in content or "openharmony" in content or "ohos" in content:
-            platforms.append("HarmonyOS")
+        if "openharmony" in content or "ohos" in content or "harmony" in content:
+            platforms.insert(0, "OpenHarmony")
         return [platforms[0]] if platforms else ["Unknown"]
 
     def _find_unity(self, version: str) -> str:
