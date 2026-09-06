@@ -1,0 +1,52 @@
+<!doctype html><meta charset='utf-8'><title>AB2 AI 分析报告</title><style>body{background:#111827;color:#dbeafe;font:15px system-ui;padding:32px;line-height:1.7}pre{white-space:pre-wrap}</style><h1>AB2 AI 失败原因分析</h1><pre>**最终结论：本次 Unity AB 资源打包失败。**
+
+Unity 在执行资源构建入口之前，因 C# 脚本编译错误终止，最终返回码为 `1`。未进入 HybridCLR DLL 编译、AB 导出或上传阶段，因此没有生成可认定为成功的 AB 产物。
+
+**根因**
+
+本地被 Git 忽略的 XLua 生成目录中残留了过期代码：
+
+`Assets/Games_Logic/ThirdPlugins/XLua/Gen/DelegatesGensBridge.cs`
+
+该文件引用了当前 `dev/8-2-26` 分支中不存在的 8 个业务类型：
+
+- `Happy_BuYu.GlobalVO.BigWinPerformType`
+- `Happy_BuYu.Game.BY_FishMaxWinBreakthroughManager`
+- `Happy_BuYu.Game.BY_MissileChoosePanel`
+- `Happy_BuYu.Game.FishComing.FishComingAvoidanceBlocker`
+- `Happy_BuYu.Game.FishComing.FishComingLevel`
+- `Happy_BuYu.Game.FishComing.FishComingHighPanelStyle`
+- `Happy_BuYu.Game.FishComing.FishComingPerformanceType`
+- `Happy_BuYu.Game.FishComing.FishComingDefinition`
+
+经当前分支源码搜索，上述类型均不存在；但 XLua 生成文件仍保留对应委托桥接代码。该目录被 `.gitignore:44` 忽略，不受分支切换和 Git 更新管理，极可能是其他分支或旧版本遗留的生成结果。
+
+**关键证据**
+
+- 启动命令指定了构建入口：`AB2-build.log:29`
+  `HLS_Editor.ExportEditor.BuildFromAB2`
+- 编译器共输出 33 条错误记录，实际为 11 个唯一 `CS0234` 错误重复打印。
+- 首个错误：`AB2-build.log:7153`
+  `BigWinPerformType` 在当前命名空间中不存在。
+- 其余核心错误集中在：`AB2-build.log:7215-7265`
+- Unity 明确判定编译失败：`AB2-build.log:7430-7431`
+  `Tundra build failed`
+  `Script Compilation Error for Games_Logic_Assembly.dll`
+- 日志结尾：`AB2-build.log:8376-8377`
+  `Scripts have compiler errors.`
+  `Application will terminate with return code 1`
+- 整份日志没有出现 `CompileHybridDLL`、`ExportAB`、`UploadAB2Sftp` 等资源构建阶段记录。
+- `PlatformProxyAndroidDev.BuildAsset()` 本应依次执行 HybridCLR 编译、`ExportAB` 和上传，见 `Assets/Editor/Main/BuildAPK/New/PlatformProxy.cs:93-103`，本次均未执行。
+- 当前分支已核实为 `dev/8-2-26`，HEAD 为 `8d9b376cc368d45edc747625b3a3529546edc30a`，受 Git 管理的工作区无修改。
+
+**建议修复步骤**
+
+1. 关闭正在运行的 Unity。
+2. 删除本地生成目录：
+   `Assets/Games_Logic/ThirdPlugins/XLua/Gen`
+3. 重新启动 Unity，先确认 `Games_Logic_Assembly` 能完整编译且 Console 无 Error。
+4. 如果本次版本需要 XLua 静态生成代码，在工程编译成功后重新执行当前分支对应的 XLua `GenAll`，确保生成结果不再引用上述类型。
+5. 再次执行相同 AB2 打包命令，并确认日志中实际出现 HybridCLR 编译、`ExportAB`、上传成功记录以及最终返回码 `0`。
+6. 建议在调用 `BuildFromAB2` 的外部脚本中增加打包前清理 XLua `Gen` 的步骤。现有 `BuildAB.cmd:28-34` 已有该处理，但本次调用链没有执行；`BuildAB2.cmd` 当前也没有相同清理逻辑。
+
+日志开头的 Licensing 签名校验、Access Token、Shader fallback 和异常 `.meta` 警告不是本次失败的直接原因，因为许可证随后成功更新，Unity 继续运行并最终明确死于脚本编译错误。</pre>
