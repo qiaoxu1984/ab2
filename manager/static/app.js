@@ -1,6 +1,7 @@
 /* Keep Manager rendering focused on channel actions and phase summaries. */
 let selectedTask = '';
 let lastTask = null;
+let lastAgentSnapshot = '';
 const projectData = {};
 
 function esc(value) {
@@ -27,6 +28,10 @@ function setChannelAction(key, running) {
 async function loadAgents() {
   /* Render channels inside one collapsible group per machine. */
   const agents = await fetch('/api/agents').then(response => response.json());
+  // Avoid rebuilding the DOM when only task status changed, which prevents visible flicker.
+  const agentSnapshot = JSON.stringify(agents);
+  if (agentSnapshot === lastAgentSnapshot) return;
+  lastAgentSnapshot = agentSnapshot;
   // Remove stale channel references when an Agent or project disappears from the live snapshot.
   Object.keys(projectData).forEach(key => delete projectData[key]);
   // The API contains only live connections, so every rendered machine is currently online.
