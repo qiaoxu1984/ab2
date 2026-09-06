@@ -31,10 +31,11 @@ async function loadAgents() {
     const key = ('p_' + agent.id + '_' + project.id + '_' + (channel.name || channel.switch_to || index)).replace(/[^A-Za-z0-9_-]/g, '_');
     const channelName = channel.name || channel.switch_to;
     const branches = (project.channel_branches || {})[channelName] || [];
+    const usesDefaultBranch = channel.branch_filter === 'default';
     const saved = localStorage.getItem(branchKey(key));
-    const selected = branches.includes(saved) ? saved : (branches[0] || '');
-    projectData[key] = { ...(projectData[key] || {}), agent_id: agent.id, project_id: project.id, channel: channelName };
-    return `<div class="channel-card"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="machine-meta">机器：${esc(agent.name)} · ${agent.online ? '在线' : '离线'} · ${esc(agent.platform)} · ${esc(agent.hostname)}</div><div class="channel-actions"><select id="branch-${key}" onchange="rememberBranch('${key}',this.value)">${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
+    const selected = usesDefaultBranch ? (project.default_branch || branches[0] || '') : (branches.includes(saved) ? saved : (branches[0] || ''));
+    projectData[key] = { ...(projectData[key] || {}), agent_id: agent.id, project_id: project.id, channel: channelName, branch_filter: channel.branch_filter || 'all_dev', default_branch: project.default_branch || '' };
+    return `<div class="channel-card"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="machine-meta">机器：${esc(agent.name)} · ${agent.online ? '在线' : '离线'} · ${esc(agent.platform)} · ${esc(agent.hostname)}</div><div class="channel-actions"><select id="branch-${key}" onchange="rememberBranch('${key}',this.value)" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
   })).flat(2)).join('') || '暂无已配置渠道';
   restoreLatestTasks();
 }
@@ -61,7 +62,8 @@ async function restoreLatestTasks() {
 async function buildProject(key) {
   /* Create a task using only the selected branch and Agent-side channel config. */
   const data = projectData[key];
-  const branch = document.querySelector('#branch-' + key)?.value;
+  // Use the project default branch directly when the channel locks branch selection.
+  const branch = data.branch_filter === 'default' ? data.default_branch : document.querySelector('#branch-' + key)?.value;
   if (!data || !branch) return;
   const response = await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...data, branch }) });
   const result = await response.json();

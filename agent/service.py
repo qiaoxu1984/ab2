@@ -44,7 +44,8 @@ class AgentService:
             item = dict(project)
             code, output = run_git(project["path"], "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes")
             item["branches"] = sorted({line.removeprefix("origin/") for line in output.splitlines() if code == 0 and line.strip()})
-            item["channel_branches"] = {channel["name"]: self._filter_branches(item["branches"], channel.get("branch_filter", "all_dev")) for channel in project.get("channels", [])}
+            # Return only the configured default branch when a channel uses the default filter.
+            item["channel_branches"] = {channel["name"]: self._filter_branches(item["branches"], channel.get("branch_filter", "all_dev"), project.get("default_branch", "")) for channel in project.get("channels", [])}
             projects.append(item)
         return {"id": local_ip, "name": self.config.data["name"], "ip": local_ip, "platform": platform.system(), "hostname": socket.gethostname(), "version": "0.1.0", "projects": projects}
 
@@ -59,8 +60,11 @@ class AgentService:
         finally:
             probe.close()
 
-    def _filter_branches(self, branches: list[str], branch_filter: str) -> list[str]:
-        """Return standard branches from the current month or previous two months."""
+    def _filter_branches(self, branches: list[str], branch_filter: str, default_branch: str = "") -> list[str]:
+        """Return the configured default branch or standard branches from recent months."""
+        # Default mode intentionally does not apply the date-based branch naming rule.
+        if branch_filter == "default":
+            return [default_branch] if default_branch and default_branch in branches else []
         now = datetime.now()
         current_month_index = now.year * 12 + now.month - 1
         allowed_months = {(((current_month_index - offset) // 12) % 100, (current_month_index - offset) % 12 + 1) for offset in range(3)}

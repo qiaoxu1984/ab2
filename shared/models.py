@@ -23,6 +23,8 @@ class ChannelConfig(BaseModel):
     switch_to: str
     build_method: str
     enabled: bool = True
+    # Select the project's default branch instead of exposing a branch list.
+    branch_filter: str = "all_dev"
 
 
 class ProjectConfig(BaseModel):

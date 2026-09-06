@@ -69,6 +69,11 @@ class BuildExecutor:
                 raise RuntimeError("switch_to must end with dev or release")
             if not self.METHOD.fullmatch(channel["build_method"]):
                 raise RuntimeError("invalid Unity build method name")
+            # Enforce the configured default branch even if a Manager request was altered.
+            if channel.get("branch_filter", "all_dev") == "default":
+                task["branch"] = project.get("default_branch", "")
+                if not task["branch"]:
+                    raise RuntimeError("project default branch is not configured")
             closed_pids = close_unity_for_project(project["path"])
             if closed_pids:
                 self._event(task_id, "log", sequence, stage="preflight", message=f"closed Unity processes: {', '.join(map(str, closed_pids))}")
