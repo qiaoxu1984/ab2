@@ -139,12 +139,16 @@ class AgentService:
         self.task_cancellations[task["task_id"]] = cancellation
         self.executor.emit = lambda event: loop.call_soon_threadsafe(events.put_nowait, event)
         build_future = loop.run_in_executor(None, self.executor.run, task, project, channel, cancellation)
+        terminal_status = ""
         while True:
             event = await events.get()
             if event.get("kind") == "analysis_done":
                 break
             await self._send_event(socket_connection, event)
-            if event.get("kind") == "status" and event.get("status") in ("success", "cancelled"):
+            if event.get("kind") == "status" and event.get("status") in ("success", "failed", "cancelled"):
+                terminal_status = event.get("status", "")
+            # Successful builds always have an analysis; cancellation before AB has none.
+            if terminal_status == "cancelled":
                 break
         await build_future
         self.task_cancellations.pop(task["task_id"], None)

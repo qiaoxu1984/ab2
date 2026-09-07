@@ -2,7 +2,6 @@
 
 import os
 import signal
-import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -10,15 +9,19 @@ from pathlib import Path
 
 def _unity_pids(project_path: str) -> list[int]:
     """Find Unity processes whose command line references the selected project."""
-    normalized = str(Path(project_path).resolve()).lower().replace("\\", "/")
+    # Keep Windows paths in their native form because Unity command lines use backslashes.
+    normalized = str(Path(project_path).resolve()).lower()
     if os.name == "nt":
         # Match both Unity and Tuanjie editor processes because either can own the project lock.
-        script = "$p=$env:AB2_PROJECT_PATH.ToLower().Replace('\\','/'); Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(Unity|Tuanjie)\\.exe$' } | ForEach-Object { $command=$_.CommandLine.ToLower().Replace('\\','/'); if ($command -and $command -match ('(^|\\s)' + [regex]::Escape($p) + '($|\\s)')) { $_.ProcessId } }"
-        powershell = Path(os.environ.get("SystemRoot", "C:\\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-        executable = str(powershell) if powershell.is_file() else shutil.which("pwsh")
+        # Pass the trusted normalized path in the script instead of through a second shell environment.
+        escaped_path = normalized.replace("'", "''")
+        script = f"$p='{escaped_path}'; Get-CimInstance Win32_Process | Where-Object {{ $_.Name -match '^(Unity|Tuanjie)\\.exe$' -and $_.CommandLine -and $_.CommandLine.ToLower().Contains($p) }} | ForEach-Object {{ $_.ProcessId }}"
+        # Use the shell name so Python resolves the same system executable as the terminal.
+        executable = "powershell.exe"
         if not executable:
             return []
-        result = subprocess.run(["cmd.exe", "/d", "/c", executable, "-NoProfile", "-Command", script], env={**os.environ, "AB2_PROJECT_PATH": normalized}, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        # Invoke PowerShell directly so cmd.exe cannot reinterpret the project path or script arguments.
+        result = subprocess.run([executable, "-NoProfile", "-Command", script], capture_output=True, text=True, encoding="utf-8", errors="replace")
     else:
         result = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, encoding="utf-8", errors="replace")
     pids = []
@@ -28,7 +31,7 @@ def _unity_pids(project_path: str) -> list[int]:
                 pids.append(int(line.strip()))
             except ValueError:
                 continue
-        elif ("unity" in line.lower() or "tuanjie" in line.lower()) and normalized in line.lower().replace("\\", "/"):
+        elif ("unity" in line.lower() or "tuanjie" in line.lower()) and normalized in line.lower().replace("/", "\\"):
             try:
                 pids.append(int(line.strip().split(None, 1)[0]))
             except (ValueError, IndexError):

@@ -93,6 +93,8 @@ class BuildExecutor:
             self._invoke_unity(task_id, project, channel["build_method"], sequence, self._agent_type(channel), cancel_event, current_stage)
             self._event(task_id, "log", sequence, stage="ab", message="generated Bundles/Diff/PackageManifest_DefaultPackage.version")
             self._event(task_id, "status", sequence, status="success", stage="ab", commit_sha=sha, message="build complete")
+            # Always start the AI analysis after the AB stage, including successful builds.
+            self._start_failure_analysis(task_id, project, task, sequence)
         except Exception as error:
             status = "cancelled" if cancel_event and cancel_event.is_set() else "failed"
             self._event(task_id, "status", sequence, status=status, stage=current_stage, error_code="" if status == "cancelled" else "build_error", message=str(error))
@@ -211,7 +213,7 @@ class BuildExecutor:
         return [line.strip() for line in lines if any(pattern.search(line) for pattern in patterns)]
 
     def _start_failure_analysis(self, task_id: str, project: dict[str, Any], task: dict[str, Any], sequence: list[int]) -> None:
-        """Start a read-only OpenCode diagnosis without blocking the build worker."""
+        """Start a read-only OpenCode build analysis without blocking the build worker."""
         def analyze() -> None:
             """Ask OpenCode to inspect the failed branch and Unity log, then stream its answer."""
             try:
@@ -224,7 +226,7 @@ class BuildExecutor:
                 if not code_directory.is_dir():
                     code_directory = Path(project["path"]) / "Assets" / "Editor"
                 prompt = (
-                    "请分析本次 Unity AB 资源打包是否成功。完整 Unity 日志文件路径是："
+                    "请分析本次 Unity AB 资源打包是否成功（成功或失败都要给出明确结论）。完整 Unity 日志文件路径是："
                     f"{project['log_path']}；对应打包工具代码目录是：{code_directory}；工程是：{project['path']}；分支是：{task['branch']}。"
                     "请优先读取并完整分析该日志，必要时查阅上述打包工具代码目录。只读分析，不要修改任何文件。"
                     "请直接用中文输出最终结论，明确说明是否成功；如果失败，给出根因、关键证据和建议修复步骤。Agent 会把最终回答生成 HTML 报告。"
