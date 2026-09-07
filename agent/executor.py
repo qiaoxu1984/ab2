@@ -88,6 +88,7 @@ class BuildExecutor:
             self._wait_before_next_stage()
             self._clear_xlua_gen(project["path"], task_id, sequence)
             self._invoke_unity(task_id, project, "HLS_Editor.ExportEditor.ResetXLua", sequence, cancel_event=cancel_event, stage=current_stage)
+            self._invoke_unity(task_id, project, "HLS_Editor.ExportEditor.WaitForCompilation", sequence, cancel_event=cancel_event, stage=current_stage)
             current_stage = "ab"
             self._wait_before_next_stage()
             # Forward version 3800 by default while allowing a channel-specific override.
