@@ -25,6 +25,8 @@ class ChannelConfig(BaseModel):
     enabled: bool = True
     # Select the project's default branch instead of exposing a branch list.
     branch_filter: str = "all_dev"
+    # Optional resource version forwarded to the Unity AB2 entry point.
+    ab2_version: str = "3800"
 
 
 class ProjectConfig(BaseModel):

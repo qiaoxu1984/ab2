@@ -90,7 +90,9 @@ class BuildExecutor:
             self._invoke_unity(task_id, project, "HLS_Editor.ExportEditor.ResetXLua", sequence, cancel_event=cancel_event, stage=current_stage)
             current_stage = "ab"
             self._wait_before_next_stage()
-            self._invoke_unity(task_id, project, channel["build_method"], sequence, self._agent_type(channel), cancel_event, current_stage)
+            # Forward version 3800 by default while allowing a channel-specific override.
+            ab2_version = channel.get("ab2_version") or "3800"
+            self._invoke_unity(task_id, project, channel["build_method"], sequence, self._agent_type(channel), cancel_event, current_stage, ab2_version)
             self._event(task_id, "log", sequence, stage="ab", message="generated Bundles/Diff/PackageManifest_DefaultPackage.version")
             self._event(task_id, "status", sequence, status="success", stage="ab", commit_sha=sha, message="build complete")
             # Always start the AI analysis after the AB stage, including successful builds.
@@ -162,7 +164,7 @@ class BuildExecutor:
         """Map the detected platform and switch type to the Unity proxy enum name."""
         return channel["switch_to"]
 
-    def _invoke_unity(self, task_id: str, project: dict[str, Any], method: str, sequence: list[int], agent_type: str = "", cancel_event: threading.Event | None = None, stage: str = "unity") -> None:
+    def _invoke_unity(self, task_id: str, project: dict[str, Any], method: str, sequence: list[int], agent_type: str = "", cancel_event: threading.Event | None = None, stage: str = "unity", ab2_version: str = "") -> None:
         """Invoke one configured Unity executeMethod and stream its output."""
         self._event(task_id, "status", sequence, stage=stage, message=f"execute {method}")
         command = [project["unity_path"], "-batchmode", "-projectPath", project["path"], "-executeMethod", method, "-logFile", project["log_path"]]
@@ -172,6 +174,9 @@ class BuildExecutor:
         if agent_type:
             # Unity exposes custom command-line values through Environment.GetCommandLineArgs().
             command.extend(["-ab2Agent", agent_type])
+        # Forward an explicitly configured resource version only to the AB2 build command.
+        if method == "HLS_Editor.ExportEditor.BuildFromAB2" and ab2_version:
+            command.extend(["-ab2Version", str(ab2_version)])
         Path(project["log_path"]).parent.mkdir(parents=True, exist_ok=True)
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
         with self.process_lock:

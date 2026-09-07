@@ -138,6 +138,21 @@ async def task_report(task_id: str) -> dict[str, str]:
     return {"url": f"/reports/{task_id}.html"}
 
 
+@app.post("/api/tasks/{task_id}/clear")
+async def clear_task(task_id: str) -> dict[str, bool]:
+    """Clear a task from the channel's current view without deleting its history."""
+    cleared = state.db.clear_task(task_id)
+    if not cleared:
+        raise HTTPException(status_code=404, detail="task not found")
+    if cleared["status"] in ("queued", "running", "cancel_requested"):
+        try:
+            await state.send(cleared["agent_id"], message("cancel_task", task_id=task_id))
+        except HTTPException:
+            # Keep the local clear operation successful when the Agent is already offline.
+            pass
+    return {"ok": True}
+
+
 @app.get("/reports/{name}")
 async def report_file(name: str) -> FileResponse:
     """Serve only a generated task report from the report directory."""
@@ -186,4 +201,5 @@ async def index() -> FileResponse:
 async def static_file(name: str) -> FileResponse:
     """Serve a dashboard asset without exposing arbitrary filesystem paths."""
     safe_name = Path(name).name
-    return FileResponse(Path(__file__).parent / "static" / safe_name)
+    # Prevent browsers from keeping stale Manager JavaScript after UI behavior changes.
+    return FileResponse(Path(__file__).parent / "static" / safe_name, headers={"Cache-Control": "no-store"})

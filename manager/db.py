@@ -29,7 +29,8 @@ class Database:
                     channel TEXT NOT NULL, branch TEXT NOT NULL, status TEXT NOT NULL,
                     stage TEXT NOT NULL DEFAULT '', commit_sha TEXT NOT NULL DEFAULT '',
                     error_code TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '',
-                    created_at REAL NOT NULL, started_at REAL, finished_at REAL,
+                 created_at REAL NOT NULL, started_at REAL, finished_at REAL,
+                 cleared_at REAL,
                     phase_times_json TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE TABLE IF NOT EXISTS logs (
@@ -51,6 +52,8 @@ class Database:
             columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(tasks)").fetchall()}
             if "phase_times_json" not in columns:
                 self.connection.execute("ALTER TABLE tasks ADD COLUMN phase_times_json TEXT NOT NULL DEFAULT '{}'")
+            if "cleared_at" not in columns:
+                self.connection.execute("ALTER TABLE tasks ADD COLUMN cleared_at REAL")
 
     def create_task(self, request: dict[str, str]) -> str:
         """Atomically create a task unless its Agent/project already runs one."""
@@ -89,10 +92,23 @@ class Database:
         """Return the newest persisted task for one Agent project channel."""
         with self.lock:
             row = self.connection.execute(
-                "SELECT id FROM tasks WHERE agent_id=? AND project_id=? AND channel=? ORDER BY created_at DESC LIMIT 1",
+                "SELECT id FROM tasks WHERE agent_id=? AND project_id=? AND channel=? AND cleared_at IS NULL ORDER BY created_at DESC LIMIT 1",
                 (agent_id, project_id, channel),
             ).fetchone()
         return self.get_task(row["id"]) if row else None
+
+    def clear_task(self, task_id: str) -> dict[str, Any] | None:
+        """Hide one task from current-channel restoration while retaining its history."""
+        with self.lock, self.connection:
+            row = self.connection.execute("SELECT id,agent_id,status FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not row:
+                return None
+            now = time.time()
+            self.connection.execute(
+                "UPDATE tasks SET status='cleared', cleared_at=?, finished_at=COALESCE(finished_at,?) WHERE id=?",
+                (now, now, task_id),
+            )
+        return dict(row)
 
     def active_tasks(self) -> list[dict[str, Any]]:
         """Return tasks waiting or running so startup can restore scheduler state."""

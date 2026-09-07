@@ -44,7 +44,7 @@ async function loadAgents() {
       const saved = localStorage.getItem(branchKey(key));
       const selected = usesDefaultBranch ? (project.default_branch || branches[0] || '') : (branches.includes(saved) ? saved : (branches[0] || ''));
       projectData[key] = { ...(projectData[key] || {}), agent_id: agent.id, project_id: project.id, channel: channelName, branch_filter: channel.branch_filter || 'all_dev', default_branch: project.default_branch || '' };
-      return `<div class="channel-card"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="channel-actions"><select id="branch-${key}" onchange="rememberBranch('${key}',this.value)" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
+      return `<div class="channel-card"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="channel-meta">资源版本：${esc(channel.ab2_version || '3800')}</div><div class="channel-actions"><select id="branch-${key}" onchange="rememberBranch('${key}',this.value)" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
     })).flat(2).join('');
     return `<details class="machine-group online" open><summary><span class="machine-name">${esc(agent.name)}</span><span class="machine-status">在线</span><span class="machine-meta">${esc(agent.hostname)} · ${esc(agent.platform)}</span></summary><div class="machine-channels">${cards || '暂无已配置渠道'}</div></details>`;
   }).join('') || '暂无已配置渠道';
@@ -63,7 +63,7 @@ async function restoreLatestTasks() {
     if (!task.id) return;
     projectData[key].task_id = task.id;
     const panel = document.querySelector('[data-channel-phase="' + key + '"]');
-    if (panel) { panel.innerHTML = taskHtml(task); panel.dataset.taskId = task.id; }
+    if (panel) { panel.innerHTML = taskHtml(task, key); panel.dataset.taskId = task.id; }
     setChannelAction(key, ['queued', 'running', 'cancel_requested'].includes(task.status));
     if (!newest || task.created_at > newest.created_at) newest = task;
   });
@@ -87,6 +87,15 @@ async function buildProject(key) {
   loadTask();
 }
 
+async function clearCurrentTask(key, taskId) {
+  /* Clear the channel's current task association while preserving task history. */
+  const response = await fetch('/api/tasks/' + taskId + '/clear', { method: 'POST' });
+  if (!response.ok) { showTaskMessage(key, '清除任务失败'); return; }
+  delete projectData[key].task_id;
+  const panel = document.querySelector('[data-channel-phase="' + key + '"]');
+  if (panel) { panel.textContent = '未开始构建'; delete panel.dataset.taskId; }
+}
+
 function showTaskMessage(key, message) {
   /* Show task errors in the corresponding channel panel. */
   const panel = document.querySelector('[data-channel-phase="' + key + '"]');
@@ -102,7 +111,7 @@ function phaseDuration(task, phase) {
   return ' · ' + Math.floor(seconds / 60) + '分' + (seconds % 60) + '秒';
 }
 
-function taskHtml(task) {
+function taskHtml(task, key = '') {
   /* Render phase states and a compact summary without the log stream. */
   const phases = ['preflight', 'git', 'xlua', 'ab', 'analysis'];
   const names = { preflight: '环境预检', git: '同步 Git 资源', xlua: '清空并重新生成 XLua', ab: '生成 AB 资源包', analysis: 'AI 结果分析' };
@@ -124,7 +133,8 @@ function taskHtml(task) {
     const detail = phase === 'analysis' && analysisDone ? `分析完成 <button class="report" onclick="openAiReport('${task.id}')">查看报告</button>` : phase === 'analysis' && started ? '报告分析中...' : state === 'success' ? '已完成' : state === 'failed' ? '失败' : phase === effectiveStage ? '执行中' : '未执行';
     return `<div class="phase ${state}"><b>${names[phase]}</b><span>${state === 'skipped' ? '已禁用' : state === 'pending' ? '未执行' : state === 'running' ? '执行中' : state === 'success' ? '成功' : '失败'}${phaseDuration(task, phase)}</span><small>${detail}</small></div>`;
   }).join('');
-    return `<div class="task-inline-head"><span>${task.status} · ${(phases.includes(task.stage) ? task.stage : task.status === 'failed' ? 'ab' : 'waiting')}</span></div><div class="phases">${cards}</div><div class="task-summary">分支：${esc(task.branch)} · Commit：${esc(task.commit_sha || '-')}</div>`;
+    const clearButton = key ? ` <button class="clear-task" onclick="clearCurrentTask('${key}','${task.id}')">清除当前任务</button>` : '';
+    return `<div class="task-inline-head"><span>${task.status} · ${(phases.includes(task.stage) ? task.stage : task.status === 'failed' ? 'ab' : 'waiting')}</span></div><div class="phases">${cards}</div><div class="task-summary">分支：${esc(task.branch)} · Commit：${esc(task.commit_sha || '-')} ${clearButton}</div>`;
 }
 
 async function loadTask() {
@@ -141,7 +151,7 @@ async function loadTaskForKey(key) {
   if (task.id !== taskId) return;
   lastTask = task;
   const panel = document.querySelector('[data-channel-phase="' + key + '"]');
-  if (panel) panel.innerHTML = taskHtml(task);
+  if (panel) panel.innerHTML = taskHtml(task, key);
   const analysisRunning = task.status === 'failed' && task.logs.some(log => log.message === '__AB2_ANALYSIS_STARTED__') && !task.logs.some(log => log.stage === 'analysis' && log.message !== '__AB2_ANALYSIS_STARTED__');
   setChannelAction(key, analysisRunning || ['queued', 'running', 'cancel_requested'].includes(task.status));
 }
@@ -153,7 +163,7 @@ async function loadSelectedTask() {
   if (!response.ok) return;
   lastTask = await response.json();
    const panel = document.querySelector('[data-channel-phase="' + Object.keys(projectData).find(key => projectData[key].task_id === lastTask.id) + '"]');
-   if (panel) panel.innerHTML = taskHtml(lastTask);
+   if (panel) panel.innerHTML = taskHtml(lastTask, Object.keys(projectData).find(key => projectData[key].task_id === lastTask.id) || '');
    const analysisRunning = lastTask.status === 'failed' && lastTask.logs.some(log => log.message === '__AB2_ANALYSIS_STARTED__') && !lastTask.logs.some(log => log.stage === 'analysis' && log.message !== '__AB2_ANALYSIS_STARTED__');
    Object.keys(projectData).forEach(key => { if (projectData[key].task_id === lastTask.id) setChannelAction(key, analysisRunning || ['queued', 'running', 'cancel_requested'].includes(lastTask.status)); });
 }

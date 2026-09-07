@@ -9,6 +9,9 @@ from typing import Any
 class AgentConfig:
     """Load and save the machine identity and local Unity projects."""
 
+    # Use the current production resource version when a channel has no override.
+    DEFAULT_AB2_VERSION = "3800"
+
     def __init__(self, path: str):
         """Load existing JSON or initialize an empty Agent configuration."""
         self.path = Path(path)
@@ -29,6 +32,9 @@ class AgentConfig:
                 raise ValueError("invalid branch filter")
             if channel.get("platform") not in ("Android", "iOS", "OpenHarmony", "HarmonyOS"):
                 raise ValueError("channel platform must be detected as Android, iOS, or OpenHarmony")
+            # Restrict the optional resource version to safe command-line characters.
+            if channel.get("ab2_version", "") and not re.fullmatch(r"[A-Za-z0-9_.-]+", str(channel["ab2_version"])):
+                raise ValueError("invalid AB2 resource version")
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", channel.get("build_method", "")):
                 raise ValueError("invalid Unity build method")
         project_ids = [item.get("id") for item in self.data["projects"]]
