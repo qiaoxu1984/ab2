@@ -78,6 +78,8 @@ class BuildExecutor:
             closed_pids = close_unity_for_project(project["path"])
             if closed_pids:
                 self._event(task_id, "log", sequence, stage="preflight", message=f"closed Unity processes: {', '.join(map(str, closed_pids))}")
+            self._clear_build_caches(project["path"], task_id, sequence)
+            self._prepare_diff_output(project["path"], task_id, sequence)
             current_stage = "git"
             self._wait_before_next_stage()
             self._event(task_id, "status", sequence, stage=current_stage, message="syncing branch")
@@ -92,6 +94,8 @@ class BuildExecutor:
             required_file = "Assets/Bundles/CSharp/AheadOfScript_Assembly/AheadOfScript_Assembly.bytes"
             before_ab_hash = self._file_sha256(project["path"], required_file)
             self._invoke_unity(task_id, project, channel["build_method"], sequence, self._agent_type(channel), cancel_event, current_stage)
+            self._verify_diff_manifest(project["path"])
+            self._event(task_id, "log", sequence, stage="ab", message="generated Bundles/Diff/PackageManifest_DefaultPackage.version")
             # AB generation must produce a new AheadOfScript assembly after the build method completes.
             after_ab_hash = self._file_sha256(project["path"], required_file)
             if after_ab_hash is None or after_ab_hash == before_ab_hash:
@@ -109,6 +113,40 @@ class BuildExecutor:
     def _wait_before_next_stage(self) -> None:
         """Leave a short visible gap between successful pipeline stages."""
         time.sleep(1)
+
+    def _clear_build_caches(self, project_path: str, task_id: str, sequence: list[int]) -> None:
+        """Remove transient Bee and HybridCLR outputs before starting a clean build."""
+        cache_paths = (
+            Path(project_path) / "Library" / "Bee",
+            Path(project_path) / "Library" / "ScriptAssemblies",
+            Path(project_path) / "HybridCLRData" / "StrippedAOTDllsTempProj",
+        )
+        for cache_path in cache_paths:
+            if not cache_path.exists():
+                continue
+            # A deletion failure indicates that a compiler process still owns this cache.
+            try:
+                shutil.rmtree(cache_path)
+            except OSError as error:
+                raise RuntimeError(f"cannot clear build cache {cache_path}: {error}") from error
+            self._event(task_id, "log", sequence, stage="preflight", message=f"cleared build cache: {cache_path}")
+
+    def _prepare_diff_output(self, project_path: str, task_id: str, sequence: list[int]) -> None:
+        """Create an empty Diff output directory so only this build can produce its manifest."""
+        diff_path = Path(project_path) / "Bundles" / "Diff"
+        if diff_path.exists():
+            try:
+                shutil.rmtree(diff_path)
+            except OSError as error:
+                raise RuntimeError(f"cannot clear Diff output {diff_path}: {error}") from error
+        diff_path.mkdir(parents=True, exist_ok=True)
+        self._event(task_id, "log", sequence, stage="preflight", message=f"cleared Diff output: {diff_path}")
+
+    def _verify_diff_manifest(self, project_path: str) -> None:
+        """Require the current AB build to generate the DefaultPackage version manifest."""
+        manifest_path = Path(project_path) / "Bundles" / "Diff" / "PackageManifest_DefaultPackage.version"
+        if not manifest_path.is_file():
+            raise RuntimeError(f"AB manifest was not generated: {manifest_path}")
 
     def _file_sha256(self, project_path: str, relative_path: str) -> str | None:
         """Return a generated file hash so AB output changes can be verified by content."""
@@ -144,7 +182,10 @@ class BuildExecutor:
     def _invoke_unity(self, task_id: str, project: dict[str, Any], method: str, sequence: list[int], agent_type: str = "", cancel_event: threading.Event | None = None, stage: str = "unity") -> None:
         """Invoke one configured Unity executeMethod and stream its output."""
         self._event(task_id, "status", sequence, stage=stage, message=f"execute {method}")
-        command = [project["unity_path"], "-batchmode", "-quit", "-projectPath", project["path"], "-executeMethod", method, "-logFile", project["log_path"]]
+        command = [project["unity_path"], "-batchmode", "-projectPath", project["path"], "-executeMethod", method, "-logFile", project["log_path"]]
+        # Async editor entry points exit themselves after compilation and the AB callback finish.
+        if method not in ("HLS_Editor.ExportEditor.WaitForCompilation", "HLS_Editor.ExportEditor.BuildFromAB2"):
+            command.insert(2, "-quit")
         if agent_type:
             # Unity exposes custom command-line values through Environment.GetCommandLineArgs().
             command.extend(["-ab2Agent", agent_type])
