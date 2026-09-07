@@ -13,7 +13,7 @@ def _unity_pids(project_path: str) -> list[int]:
     normalized = str(Path(project_path).resolve()).lower().replace("\\", "/")
     if os.name == "nt":
         # Match both Unity and Tuanjie editor processes because either can own the project lock.
-        script = "$p=$env:AB2_PROJECT_PATH.ToLower().Replace('\\\\','/'); Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(Unity|Tuanjie)\\.exe$' } | ForEach-Object { if ($_.CommandLine -and $_.CommandLine.ToLower().Replace('\\\\','/').Contains($p)) { $_.ProcessId } }"
+        script = "$p=$env:AB2_PROJECT_PATH.ToLower().Replace('\\','/'); Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^(Unity|Tuanjie)\\.exe$' } | ForEach-Object { $command=$_.CommandLine.ToLower().Replace('\\','/'); if ($command -and $command -match ('(^|\\s)' + [regex]::Escape($p) + '($|\\s)')) { $_.ProcessId } }"
         powershell = Path(os.environ.get("SystemRoot", "C:\\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
         executable = str(powershell) if powershell.is_file() else shutil.which("pwsh")
         if not executable:
