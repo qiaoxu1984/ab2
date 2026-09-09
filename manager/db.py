@@ -143,12 +143,12 @@ class Database:
             if event["kind"] == "report":
                 self.connection.execute("INSERT OR REPLACE INTO reports(task_id,html,created_at) VALUES(?,?,?)", (event["task_id"], event.get("html", ""), now))
             self.connection.execute(
-                """UPDATE tasks SET stage=?, commit_sha=COALESCE(NULLIF(?,''),commit_sha),
+                """UPDATE tasks SET stage=CASE WHEN ?='status' THEN ? ELSE stage END, commit_sha=COALESCE(NULLIF(?,''),commit_sha),
                  error_code=COALESCE(NULLIF(?,''),error_code), error_message=COALESCE(NULLIF(?,''),error_message),
                  status=COALESCE(NULLIF(?,''),status), started_at=COALESCE(started_at,?),
                  finished_at=CASE WHEN ? IN ('success','failed','cancelled','unknown') THEN ? ELSE finished_at END,
                  phase_times_json=? WHERE id=?""",
-                (event.get("stage", "") if event.get("kind") == "status" else "", event.get("commit_sha", ""), event.get("error_code", ""),
+                 (event.get("kind", ""), event.get("stage", ""), event.get("commit_sha", ""), event.get("error_code", ""),
                  event.get("message", "") if event.get("kind") == "status" else "",
                   event.get("status", ""), now, event.get("status", ""), now, json.dumps(phase_times), event["task_id"]),
             )

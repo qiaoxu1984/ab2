@@ -106,7 +106,11 @@ function phaseDuration(task, phase) {
   /* Format the persisted duration of one phase, including live elapsed time. */
   const timing = (task.phase_times || {})[phase];
   if (!timing) return '';
-  const end = timing.finished_at || Date.now() / 1000;
+  // Recover historical phase durations from the next phase when older events omitted finished_at.
+  const phases = ['preflight', 'git', 'xlua', 'ab', 'analysis'];
+  const nextStart = phases.slice(phases.indexOf(phase) + 1).map(name => task.phase_times?.[name]?.started_at).find(Boolean);
+  const terminalEnd = ['success', 'failed', 'cancelled', 'unknown'].includes(task.status) ? task.finished_at : null;
+  const end = timing.finished_at || nextStart || terminalEnd || Date.now() / 1000;
   const seconds = Math.max(0, Math.round(end - timing.started_at));
   return ' · ' + Math.floor(seconds / 60) + '分' + (seconds % 60) + '秒';
 }
