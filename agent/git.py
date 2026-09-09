@@ -14,7 +14,8 @@ def sync_branch(project_path: str, branch: str, on_output: Callable[[str], None]
     """Fetch and reset a clean local branch, returning its resulting commit SHA."""
     if not branch or branch.startswith("-"):
         raise ValueError("invalid branch")
-    commands = [("fetch", "--all", "--prune"), ("checkout", branch), ("reset", "--hard", f"origin/{branch}"), ("clean", "-df")]
+    # Clear build-generated worktree changes before checkout, otherwise Git refuses to overwrite tracked files.
+    commands = [("reset", "--hard"), ("clean", "-df"), ("fetch", "--all", "--prune"), ("checkout", branch), ("reset", "--hard", f"origin/{branch}"), ("clean", "-df")]
     for args in commands:
         code, output = run_git(project_path, *args)
         if on_output:
@@ -22,6 +23,9 @@ def sync_branch(project_path: str, branch: str, on_output: Callable[[str], None]
                 on_output(line)
         if code:
             raise RuntimeError(f"git {' '.join(args)} failed: {output}")
+    code, current_branch = run_git(project_path, "branch", "--show-current")
+    if code or current_branch != branch:
+        raise RuntimeError(f"git checkout did not select requested branch: expected {branch}, got {current_branch}")
     code, sha = run_git(project_path, "rev-parse", "HEAD")
     if code:
         raise RuntimeError(f"cannot resolve commit: {sha}")
