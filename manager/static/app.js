@@ -121,6 +121,7 @@ async function buildProject(key) {
 
 async function clearCurrentTask(key, taskId) {
   /* Clear the channel's current task association while preserving task history. */
+  if (!window.confirm('确定要清除当前任务吗？任务历史记录不会被删除。')) return;
   const response = await fetch('/api/tasks/' + taskId + '/clear', { method: 'POST' });
   if (!response.ok) { showTaskMessage(key, '清除任务失败'); return; }
   delete projectData[key].task_id;
@@ -147,6 +148,12 @@ function phaseDuration(task, phase) {
   return ' · ' + Math.floor(seconds / 60) + '分' + (seconds % 60) + '秒';
 }
 
+function formatTaskTime(timestamp) {
+  /* Format persisted Unix timestamps as readable local time for the task summary. */
+  if (!timestamp) return '-';
+  return new Date(timestamp * 1000).toLocaleString('zh-CN', { hour12: false });
+}
+
 function taskHtml(task, key = '') {
   /* Render phase states and a compact summary without the log stream. */
   const phases = ['preflight', 'git', 'xlua', 'ab', 'analysis'];
@@ -170,7 +177,7 @@ function taskHtml(task, key = '') {
     return `<div class="phase ${state}"><b>${names[phase]}</b><span>${state === 'skipped' ? '已禁用' : state === 'pending' ? '未执行' : state === 'running' ? '执行中' : state === 'success' ? '成功' : '失败'}${phaseDuration(task, phase)}</span><small>${detail}</small></div>`;
   }).join('');
     const clearButton = key ? ` <button class="clear-task" onclick="clearCurrentTask('${key}','${task.id}')">清除当前任务</button>` : '';
-    return `<div class="task-inline-head"><span>${task.status} · ${(phases.includes(task.stage) ? task.stage : task.status === 'failed' ? 'ab' : 'waiting')}</span></div><div class="phases">${cards}</div><div class="task-summary">分支：${esc(task.branch)} · Commit：${esc(task.commit_sha || '-')} ${clearButton}</div>`;
+    return `<div class="task-inline-head"><span>${task.status} · ${(phases.includes(task.stage) ? task.stage : task.status === 'failed' ? 'ab' : 'waiting')}</span></div><div class="phases">${cards}</div><div class="task-summary">开始时间：${esc(formatTaskTime(task.started_at))} · 完成时间：${esc(formatTaskTime(task.finished_at))}<br>分支：${esc(task.branch)} · Commit：${esc(task.commit_sha || '-')} ${clearButton}</div>`;
 }
 
 async function loadTask() {
