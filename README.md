@@ -25,6 +25,14 @@ Start an Agent on each build machine. `run_agent.bat` automatically installs the
 python -m agent.service --manager ws://172.18.67.71:8000/ws/agent --config data/agent.json
 ```
 
+On macOS, use the one-command launcher (make it executable once with `chmod +x start_ab2.sh`):
+
+```text
+./start_ab2.sh
+```
+
+The launcher creates `.venv`, installs dependencies, starts Manager, Agent, and the local control page, then opens `http://127.0.0.1:8010/`. It uses `ws://172.18.67.71:8000/ws/agent` by default; set `AB2_MANAGER_URL` before running it when the Manager address changes.
+
 The Agent configuration page is available at `http://127.0.0.1:8020/`. Add Unity projects and channels there. The project platform is read from the newest Unity `Library/PlayerDataCache` target directory and is read-only. Generated Unity logs are saved under `<project>/Log/AB2-build.log`. A channel requires a name, `SwitchTo` (`android_dev`, `android_release`, `ios_dev`, `ios_release`, `openharmony_dev`, or `openharmony_release`), and Unity build method. AB2 invokes `HLS_Editor.ExportEditor.BuildFromAB2` and passes the selected `SwitchTo` value as `-ab2Agent`. AB2 does not inspect or upload output files; the configured Unity method owns its default output behavior. The supported platform label is `OpenHarmony`.
 
 The Agent configuration file is created after the first project is saved in the Agent page. A project contains `id`, `name`, `path`, `unity_path`, `log_path`, and `default_branch`; each channel contains `name`, read-only `platform` (`Android`, `iOS`, or `OpenHarmony`), `switch_to` (`android_dev`, `android_release`, `ios_dev`, `ios_release`, `openharmony_dev`, or `openharmony_release`), and `build_method`.
