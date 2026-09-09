@@ -188,8 +188,8 @@ class BuildExecutor:
         """Invoke one configured Unity executeMethod and stream its output."""
         self._event(task_id, "status", sequence, stage=stage, message=f"execute {method}")
         command = [project["unity_path"], "-batchmode", "-projectPath", project["path"], "-executeMethod", method, "-logFile", project["log_path"]]
-        # Async editor entry points exit themselves after compilation and the AB callback finish.
-        if method not in ("HLS_Editor.ExportEditor.WaitForCompilation", "HLS_Editor.ExportEditor.BuildFromAB2"):
+        # WaitForCompilation exits through its own continuation; the synchronous AB entry point needs -quit here.
+        if method != "HLS_Editor.ExportEditor.WaitForCompilation":
             command.insert(2, "-quit")
         if agent_type:
             # Unity exposes custom command-line values through Environment.GetCommandLineArgs().
