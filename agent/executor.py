@@ -21,10 +21,29 @@ class BuildExecutor:
 
     def __init__(self, emit: Callable[[dict[str, Any]], None]):
         """Store the event callback used for live and replayable progress."""
-        self.emit = emit
+        # Keep callbacks isolated per task so concurrent projects cannot overwrite each other's event stream.
+        self.emitters: dict[str, Callable[[dict[str, Any]], None]] = {}
+        self.emitter_lock = threading.Lock()
+        self.default_emit = emit
         self.locks: dict[str, threading.Lock] = {}
         self.processes: dict[str, subprocess.Popen[Any]] = {}
         self.process_lock = threading.Lock()
+
+    def set_emitter(self, task_id: str, emit: Callable[[dict[str, Any]], None]) -> None:
+        """Register the event callback belonging to one running task."""
+        with self.emitter_lock:
+            self.emitters[task_id] = emit
+
+    def clear_emitter(self, task_id: str) -> None:
+        """Remove a task callback after its event consumer has finished."""
+        with self.emitter_lock:
+            self.emitters.pop(task_id, None)
+
+    def _emit(self, task_id: str, event: dict[str, Any]) -> None:
+        """Deliver an event through the callback registered for its task."""
+        with self.emitter_lock:
+            emit = self.emitters.get(task_id, self.default_emit)
+        emit(event)
 
     def cancel(self, task_id: str) -> None:
         """Terminate the Unity process immediately when a running task is cancelled."""
@@ -36,7 +55,7 @@ class BuildExecutor:
     def _event(self, task_id: str, kind: str, sequence: list[int], **data: Any) -> None:
         """Emit a monotonically numbered event for reconnect de-duplication."""
         sequence[0] += 1
-        self.emit({"task_id": task_id, "kind": kind, "sequence": sequence[0], **data})
+        self._emit(task_id, {"task_id": task_id, "kind": kind, "sequence": sequence[0], **data})
 
     def _important_log(self, task_id: str, sequence: list[int], stage: str, line: str) -> None:
         """Forward actionable logs while dropping noisy file-by-file progress lines."""
@@ -273,9 +292,9 @@ class BuildExecutor:
                     report_path = Path(project["path"]) / "AB2Reports" / f"{task_id}.html"
                     report_path.parent.mkdir(parents=True, exist_ok=True)
                     report_path.write_text(report_html, encoding="utf-8")
-                    self.emit({"task_id": task_id, "kind": "report", "html": report_html})
+                    self._emit(task_id, {"task_id": task_id, "kind": "report", "html": report_html})
             except Exception as analysis_error:
                 self._event(task_id, "log", sequence, stage="analysis", message=f"OpenCode 分析失败：{analysis_error}")
             finally:
-                self.emit({"task_id": task_id, "kind": "analysis_done"})
+                self._emit(task_id, {"task_id": task_id, "kind": "analysis_done"})
         threading.Thread(target=analyze, name=f"ab2-analysis-{task_id}", daemon=True).start()

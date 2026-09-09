@@ -137,7 +137,7 @@ class AgentService:
         events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         cancellation = threading.Event()
         self.task_cancellations[task["task_id"]] = cancellation
-        self.executor.emit = lambda event: loop.call_soon_threadsafe(events.put_nowait, event)
+        self.executor.set_emitter(task["task_id"], lambda event: loop.call_soon_threadsafe(events.put_nowait, event))
         build_future = loop.run_in_executor(None, self.executor.run, task, project, channel, cancellation)
         terminal_status = ""
         while True:
@@ -152,6 +152,7 @@ class AgentService:
                 break
         await build_future
         self.task_cancellations.pop(task["task_id"], None)
+        self.executor.clear_emitter(task["task_id"])
 
     async def _send_event(self, socket_connection: Any, event: dict[str, Any]) -> None:
         """Send one task event using the protocol envelope."""
