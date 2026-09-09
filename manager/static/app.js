@@ -2,6 +2,8 @@
 let selectedTask = '';
 let lastTask = null;
 let lastAgentSnapshot = '';
+// Keep the selected build type in memory so refreshing Agent data preserves the active tab.
+let activeBuildType = 'dev';
 const projectData = {};
 
 function esc(value) {
@@ -25,6 +27,34 @@ function setChannelAction(key, running) {
   if (build) build.style.display = running ? 'none' : '';
 }
 
+function getBuildType(channel) {
+  /* Classify a configured channel by its final SwitchTo suffix. */
+  const suffix = String(channel.switch_to || '').split('_').pop();
+  return suffix === 'release' ? 'release' : 'dev';
+}
+
+function setBuildType(buildType) {
+  /* Switch between development and release channels without reloading the page. */
+  activeBuildType = buildType === 'release' ? 'release' : 'dev';
+  document.querySelectorAll('.build-tab').forEach(tab => {
+    const selected = tab.dataset.buildType === activeBuildType;
+    tab.classList.toggle('active', selected);
+    tab.setAttribute('aria-selected', String(selected));
+  });
+  document.querySelectorAll('.machine-group').forEach(group => {
+    const cards = [...group.querySelectorAll('.channel-card')];
+    const visible = cards.some(card => card.dataset.buildType === activeBuildType);
+    group.hidden = !visible;
+    group.style.display = visible ? '' : 'none';
+    cards.forEach(card => {
+      // Explicit display control prevents the card's display:grid rule from overriding hidden.
+      const hidden = card.dataset.buildType !== activeBuildType;
+      card.hidden = hidden;
+      card.style.display = hidden ? 'none' : '';
+    });
+  });
+}
+
 async function loadAgents() {
   /* Render channels inside one collapsible group per machine. */
   const agents = await fetch('/api/agents').then(response => response.json());
@@ -44,11 +74,13 @@ async function loadAgents() {
       const saved = localStorage.getItem(branchKey(key));
       const selected = usesDefaultBranch ? (project.default_branch || branches[0] || '') : (branches.includes(saved) ? saved : (branches[0] || ''));
       projectData[key] = { ...(projectData[key] || {}), agent_id: agent.id, project_id: project.id, channel: channelName, branch_filter: channel.branch_filter || 'all_dev', default_branch: project.default_branch || '' };
-      return `<div class="channel-card"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="channel-meta">资源版本：${esc(channel.ab2_version || '3800')}</div><div class="channel-actions"><select id="branch-${key}" onchange="rememberBranch('${key}',this.value)" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
+       const buildType = getBuildType(channel);
+       return `<div class="channel-card" data-build-type="${buildType}"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="channel-meta">资源版本：${esc(channel.ab2_version || '3800')}</div><div class="channel-actions"><select id="branch-${key}" onchange="rememberBranch('${key}',this.value)" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
     })).flat(2).join('');
     return `<details class="machine-group online" open><summary><span class="machine-name">${esc(agent.name)}</span><span class="machine-status">在线</span><span class="machine-meta">${esc(agent.hostname)} · ${esc(agent.platform)}</span></summary><div class="machine-channels">${cards || '暂无已配置渠道'}</div></details>`;
   }).join('') || '暂无已配置渠道';
-  restoreLatestTasks();
+   setBuildType(activeBuildType);
+   restoreLatestTasks();
 }
 
 async function restoreLatestTasks() {
