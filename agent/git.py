@@ -15,7 +15,9 @@ def sync_branch(project_path: str, branch: str, on_output: Callable[[str], None]
     if not branch or branch.startswith("-"):
         raise ValueError("invalid branch")
     # Clear build-generated worktree changes before checkout, otherwise Git refuses to overwrite tracked files.
-    commands = [("reset", "--hard"), ("clean", "-df"), ("fetch", "--all", "--prune"), ("checkout", branch), ("reset", "--hard", f"origin/{branch}"), ("clean", "-df")]
+    # Preserve the legacy shared log because another process may still hold it; new tasks use per-task logs.
+    clean_args = ("clean", "-df", "-e", "Log/AB2-build.log")
+    commands = [("reset", "--hard"), clean_args, ("fetch", "--all", "--prune"), ("checkout", branch), ("reset", "--hard", f"origin/{branch}"), clean_args]
     for args in commands:
         code, output = run_git(project_path, *args)
         if on_output:
