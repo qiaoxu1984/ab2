@@ -19,10 +19,27 @@ mkdir -p "$ROOT_DIR/data/service-logs"
 # Use the existing Manager LAN address by default; override it through the environment when needed.
 MANAGER_URL="${AB2_MANAGER_URL:-ws://172.18.67.71:8000/ws/agent}"
 
-# Start Manager, Agent, and the local control page in the background with separate logs.
-nohup "$PYTHON_BIN" -m uvicorn manager.main:app --host 0.0.0.0 --port 8000 >"$ROOT_DIR/data/service-logs/manager.log" 2>&1 &
-nohup "$PYTHON_BIN" -m agent.service --manager "$MANAGER_URL" --config data/agent.json --web-port 8020 >"$ROOT_DIR/data/service-logs/agent.log" 2>&1 &
-nohup "$PYTHON_BIN" control.py --host 127.0.0.1 --port 8010 >"$ROOT_DIR/data/service-logs/control.log" 2>&1 &
+# Check whether a TCP port already has a listener before launching another service.
+port_in_use() {
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null | grep -q '[0-9]'
+}
+
+# Start the local Manager only when requested or when the Agent points to this machine.
+if [ "${AB2_START_MANAGER:-0}" = "1" ] || [ "$MANAGER_URL" = "ws://127.0.0.1:8000/ws/agent" ] || [ "$MANAGER_URL" = "ws://localhost:8000/ws/agent" ]; then
+    if ! port_in_use 8000; then
+        nohup "$PYTHON_BIN" -m uvicorn manager.main:app --host 0.0.0.0 --port 8000 >"$ROOT_DIR/data/service-logs/manager.log" 2>&1 &
+    fi
+fi
+
+# Start the Agent only when its local configuration page port is available.
+if ! port_in_use 8020; then
+    nohup "$PYTHON_BIN" -m agent.service --manager "$MANAGER_URL" --config data/agent.json --web-port 8020 >"$ROOT_DIR/data/service-logs/agent.log" 2>&1 &
+fi
+
+# Start the local control page only once.
+if ! port_in_use 8010; then
+    nohup "$PYTHON_BIN" control.py --host 127.0.0.1 --port 8010 >"$ROOT_DIR/data/service-logs/control.log" 2>&1 &
+fi
 
 # Give the control page a moment to bind before opening the browser.
 sleep 2

@@ -31,7 +31,7 @@ On macOS, use the one-command launcher (make it executable once with `chmod +x s
 ./start_ab2.sh
 ```
 
-The launcher creates `.venv`, installs dependencies, starts Manager, Agent, and the local control page, then opens `http://127.0.0.1:8010/`. It uses `ws://172.18.67.71:8000/ws/agent` by default; set `AB2_MANAGER_URL` before running it when the Manager address changes.
+The launcher creates `.venv`, installs dependencies, starts the Agent and local control page, then opens `http://127.0.0.1:8010/`. It uses `ws://172.18.67.71:8000/ws/agent` by default and does not start a duplicate local Manager. Services already listening on ports 8000, 8010, or 8020 are reused. To run a local Manager instead, set `AB2_MANAGER_URL=ws://127.0.0.1:8000/ws/agent`; to force-start one, use `AB2_START_MANAGER=1`.
 
 The Agent configuration page is available at `http://127.0.0.1:8020/`. Add Unity projects and channels there. The project platform is read from the newest Unity `Library/PlayerDataCache` target directory and is read-only. Generated Unity logs are saved under `<project>/Log/AB2-build.log`. A channel requires a name, `SwitchTo` (`android_dev`, `android_release`, `ios_dev`, `ios_release`, `openharmony_dev`, or `openharmony_release`), and Unity build method. AB2 invokes `HLS_Editor.ExportEditor.BuildFromAB2` and passes the selected `SwitchTo` value as `-ab2Agent`. AB2 does not inspect or upload output files; the configured Unity method owns its default output behavior. The supported platform label is `OpenHarmony`.
 

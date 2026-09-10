@@ -173,13 +173,19 @@ class AgentWebHandler(BaseHTTPRequestHandler):
     def _select_folder(self) -> dict[str, Any]:
         """Open the native desktop folder dialog and inspect the chosen Unity project."""
         try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            selected = filedialog.askdirectory(title="选择 Unity 工程文件夹")
-            root.destroy()
+            if platform.system() == "Darwin":
+                # Use Finder's native dialog because a nohup Agent has no reliable Tk window owner.
+                script = 'try\n set selectedFolder to choose folder with prompt "选择 Unity 工程文件夹"\n return POSIX path of selectedFolder\non error number -128\n return ""\nend try'
+                result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, encoding="utf-8", errors="replace")
+                selected = result.stdout.strip() if result.returncode == 0 else ""
+            else:
+                import tkinter as tk
+                from tkinter import filedialog
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes("-topmost", True)
+                selected = filedialog.askdirectory(title="选择 Unity 工程文件夹")
+                root.destroy()
         except Exception as error:
             return {"ok": False, "error": f"无法打开系统文件夹选择器: {error}"}
         if not selected:
