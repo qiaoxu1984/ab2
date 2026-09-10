@@ -117,6 +117,9 @@ class AgentService:
                 elif data.get("type") == "build_task":
                     # Each project task gets its own worker while BuildExecutor shares project locks.
                     asyncio.create_task(self._start_task(socket_connection, data))
+                elif data.get("type") == "analyze_task":
+                    # Manual analysis is restricted to terminal tasks so it cannot replace a live build callback.
+                    asyncio.create_task(self._start_manual_analysis(socket_connection, data["task"]))
                 elif data.get("type") == "cancel_task":
                     cancellation = self.task_cancellations.get(data["task_id"])
                     if cancellation:
@@ -157,6 +160,33 @@ class AgentService:
     async def _send_event(self, socket_connection: Any, event: dict[str, Any]) -> None:
         """Send one task event using the protocol envelope."""
         await socket_connection.send(json.dumps({"type": "event", "event": event}))
+
+    async def _start_manual_analysis(self, socket_connection: Any, task: dict[str, Any]) -> None:
+        """Run a fresh analysis for a finished task and stream it back to Manager."""
+        project = next((item for item in self.config.data["projects"] if item["id"] == task["project_id"]), None)
+        if not project:
+            await self._send_event(socket_connection, {"task_id": task["id"], "kind": "log", "stage": "analysis", "sequence": 1000001, "message": "工程配置不存在，无法主动分析"})
+            return
+        # Reuse the exact task log instead of the project's legacy shared log path.
+        task_project = dict(project)
+        log_candidates = sorted((Path(project["path"]) / "Log").glob(f"AB2-build-{task['id']}-*.log"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if log_candidates:
+            task_project["log_path"] = str(log_candidates[0])
+        loop = asyncio.get_running_loop()
+        events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        task_id = task["id"]
+        # Keep manual-analysis sequence numbers away from the build event sequence range.
+        sequence = [1_000_000]
+        self.executor.set_emitter(task_id, lambda event: loop.call_soon_threadsafe(events.put_nowait, event))
+        try:
+            self.executor._start_failure_analysis(task_id, task_project, task, sequence)
+            while True:
+                event = await events.get()
+                if event.get("kind") == "analysis_done":
+                    break
+                await self._send_event(socket_connection, event)
+        finally:
+            self.executor.clear_emitter(task_id)
 
 
 def main() -> None:

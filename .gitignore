@@ -21,3 +21,6 @@ htmlcov/
 
 # Local Manager runtime database
 /data/manager.sqlite3
+/agent/__pycache__
+/manager/__pycache__
+/shared/__pycache__

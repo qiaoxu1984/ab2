@@ -138,6 +138,18 @@ async def task_report(task_id: str) -> dict[str, str]:
     return {"url": f"/reports/{task_id}.html"}
 
 
+@app.post("/api/tasks/{task_id}/analyze")
+async def analyze_task(task_id: str) -> dict[str, bool]:
+    """Ask the owning Agent to run a fresh read-only AI analysis for a finished task."""
+    result = state.db.get_task(task_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="task not found")
+    if result["status"] in ("queued", "running", "cancel_requested"):
+        raise HTTPException(status_code=409, detail="task is still running")
+    await state.send(result["agent_id"], message("analyze_task", task=result))
+    return {"ok": True}
+
+
 @app.post("/api/tasks/{task_id}/clear")
 async def clear_task(task_id: str) -> dict[str, bool]:
     """Clear a task from the channel's current view without deleting its history."""

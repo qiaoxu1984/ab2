@@ -78,6 +78,9 @@ class BuildExecutor:
             return
         try:
             current_stage = "preflight"
+            # Use an immutable per-task project copy so concurrent builds never share a Unity log file.
+            task_project = dict(project)
+            task_project["log_path"] = str(Path(project["path"]) / "Log" / f"AB2-build-{task_id}-{time.strftime('%Y%m%d_%H%M%S')}.log")
             if cancel_event and cancel_event.is_set():
                 self._event(task_id, "status", sequence, status="cancelled", stage="cancelled", message="build cancelled")
                 return
@@ -106,22 +109,22 @@ class BuildExecutor:
             current_stage = "xlua"
             self._wait_before_next_stage()
             self._clear_xlua_gen(project["path"], task_id, sequence)
-            self._invoke_unity(task_id, project, "HLS_Editor.ExportEditor.ResetXLua", sequence, cancel_event=cancel_event, stage=current_stage)
-            self._invoke_unity(task_id, project, "HLS_Editor.ExportEditor.WaitForCompilation", sequence, cancel_event=cancel_event, stage=current_stage)
+            self._invoke_unity(task_id, task_project, "HLS_Editor.ExportEditor.ResetXLua", sequence, cancel_event=cancel_event, stage=current_stage)
+            self._invoke_unity(task_id, task_project, "HLS_Editor.ExportEditor.WaitForCompilation", sequence, cancel_event=cancel_event, stage=current_stage)
             current_stage = "ab"
             self._wait_before_next_stage()
             # Forward version 3800 by default while allowing a channel-specific override.
             ab2_version = channel.get("ab2_version") or "3800"
-            self._invoke_unity(task_id, project, channel["build_method"], sequence, self._agent_type(channel), cancel_event, current_stage, ab2_version)
+            self._invoke_unity(task_id, task_project, channel["build_method"], sequence, self._agent_type(channel), cancel_event, current_stage, ab2_version)
             self._event(task_id, "log", sequence, stage="ab", message="generated Bundles/Diff/PackageManifest_DefaultPackage.version")
             self._event(task_id, "status", sequence, status="success", stage="ab", commit_sha=sha, message="build complete")
             # Always start the AI analysis after the AB stage, including successful builds.
-            self._start_failure_analysis(task_id, project, task, sequence)
+            self._start_failure_analysis(task_id, task_project, task, sequence)
         except Exception as error:
             status = "cancelled" if cancel_event and cancel_event.is_set() else "failed"
             self._event(task_id, "status", sequence, status=status, stage=current_stage, error_code="" if status == "cancelled" else "build_error", message=str(error))
             if status == "failed":
-                self._start_failure_analysis(task_id, project, task, sequence)
+                self._start_failure_analysis(task_id, task_project, task, sequence)
         finally:
             lock.release()
 

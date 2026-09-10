@@ -129,6 +129,20 @@ async function clearCurrentTask(key, taskId) {
   if (panel) { panel.textContent = '未开始构建'; delete panel.dataset.taskId; }
 }
 
+async function triggerAiAnalysis(taskId) {
+  /* Trigger a fresh read-only AI analysis for a completed task. */
+  const button = document.querySelector('[data-analysis-task="' + taskId + '"]');
+  if (button) { button.disabled = true; button.textContent = '分析请求中...'; }
+  const response = await fetch('/api/tasks/' + taskId + '/analyze', { method: 'POST' });
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({}));
+    if (button) { button.disabled = false; button.textContent = '主动分析'; }
+    window.alert('主动分析失败：' + (result.detail || 'Agent 不可用'));
+    return;
+  }
+  loadTask();
+}
+
 function showTaskMessage(key, message) {
   /* Show task errors in the corresponding channel panel. */
   const panel = document.querySelector('[data-channel-phase="' + key + '"]');
@@ -173,7 +187,8 @@ function taskHtml(task, key = '') {
     else if (task.status === 'success' && index < 4) state = 'success';
     else if (index < current) state = 'success';
     else if (phase === effectiveStage && task.status !== 'failed') state = 'running';
-    const detail = phase === 'analysis' && analysisDone ? `分析完成 <button class="report" onclick="openAiReport('${task.id}')">查看报告</button>` : phase === 'analysis' && started ? '报告分析中...' : state === 'success' ? '已完成' : state === 'failed' ? '失败' : phase === effectiveStage ? '执行中' : '未执行';
+    const analysisAction = phase === 'analysis' && (analysisDone || analysisFailed || (!started && ['success', 'failed', 'cancelled', 'cleared'].includes(task.status))) ? ` <button class="analysis-trigger" data-analysis-task="${task.id}" onclick="triggerAiAnalysis('${task.id}')">主动分析</button>` : '';
+    const detail = phase === 'analysis' && analysisDone ? `分析完成 <button class="report" onclick="openAiReport('${task.id}')">查看报告</button>${analysisAction}` : phase === 'analysis' && started ? `报告分析中...${analysisAction}` : state === 'success' ? '已完成' : state === 'failed' ? '失败' : phase === effectiveStage ? '执行中' : '未执行';
     return `<div class="phase ${state}"><b>${names[phase]}</b><span>${state === 'skipped' ? '已禁用' : state === 'pending' ? '未执行' : state === 'running' ? '执行中' : state === 'success' ? '成功' : '失败'}${phaseDuration(task, phase)}</span><small>${detail}</small></div>`;
   }).join('');
     const clearButton = key ? ` <button class="clear-task" onclick="clearCurrentTask('${key}','${task.id}')">清除当前任务</button>` : '';
