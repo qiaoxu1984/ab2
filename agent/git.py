@@ -46,11 +46,10 @@ def mainline_branch(branch: str) -> str:
     return match.group("mainline") if match else ""
 
 
-def merge_mainline(project_path: str, mainline: str, on_output: Callable[[str], None] | None = None) -> None:
-    """Merge the fetched origin mainline into the current branch without committing.
+def merge_mainline(project_path: str, mainline: str, on_output: Callable[[str], None] | None = None) -> str:
+    """Merge the fetched origin mainline into the current branch and commit the result.
 
-    The merge result stays in the worktree and index, so the packed data contains
-    the mainline changes while the local branch keeps its original commit.
+    Returns the merge commit SHA so the task record can show the synced revision.
     """
     if not mainline or mainline.startswith("-"):
         raise ValueError("invalid mainline branch")
@@ -58,7 +57,10 @@ def merge_mainline(project_path: str, mainline: str, on_output: Callable[[str], 
     if code:
         # A missing mainline is a caller-side skip instead of a build failure.
         raise LookupError(f"origin/{mainline} does not exist")
-    args = ("merge", "--no-ff", "--no-commit", f"origin/{mainline}")
+    # Build machines may have no Git identity, so fall back to a stable AB2 author.
+    code, email = run_git(project_path, "config", "user.email")
+    setup = () if code == 0 and email else ("-c", "user.email=ab2@local", "-c", "user.name=AB2")
+    args = (*setup, "merge", "--no-ff", "--no-edit", f"origin/{mainline}")
     code, output = run_git(project_path, *args)
     if on_output:
         for line in output.splitlines():
@@ -67,6 +69,10 @@ def merge_mainline(project_path: str, mainline: str, on_output: Callable[[str], 
         # Abort so a conflicted merge cannot leak into the next build.
         run_git(project_path, "merge", "--abort")
         raise RuntimeError(f"git {' '.join(args)} failed: {output}")
+    code, sha = run_git(project_path, "rev-parse", "HEAD")
+    if code:
+        raise RuntimeError(f"cannot resolve merge commit: {sha}")
+    return sha
 
 
 def file_changed(project_path: str, old_sha: str, new_sha: str, file_path: str) -> bool:

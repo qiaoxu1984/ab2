@@ -139,12 +139,13 @@ class BuildExecutor:
             return
         self._event(task_id, "log", sequence, stage="git", message=f"merging mainline origin/{mainline} into {task['branch']}")
         try:
-            merge_mainline(project["path"], mainline, lambda line: self._important_log(task_id, sequence, "git", line))
+            merge_sha = merge_mainline(project["path"], mainline, lambda line: self._important_log(task_id, sequence, "git", line))
         except LookupError as error:
             # A missing mainline is surfaced in the log without failing the build.
             self._event(task_id, "log", sequence, stage="git", message=f"mainline merge skipped: {error}")
             return
-        self._event(task_id, "log", sequence, stage="git", message=f"mainline merged: origin/{mainline}")
+        # Report the merge commit so the task record shows the synced revision.
+        self._event(task_id, "log", sequence, stage="git", commit_sha=merge_sha, message=f"mainline merged: origin/{mainline} -> {merge_sha[:10]}")
 
     def _wait_before_next_stage(self) -> None:
         """Leave a short visible gap between successful pipeline stages."""
