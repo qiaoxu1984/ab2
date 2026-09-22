@@ -39,6 +39,8 @@ The Agent configuration file is created after the first project is saved in the 
 
 The Manager dashboard is available at `http://localhost:8000/`. The current MVP exposes registration, heartbeat, configuration synchronization, task dispatch, task persistence, and task log snapshots. Build task creation is available through `POST /api/tasks` with `agent_id`, `project_id`, `channel`, and `branch`.
 
+The dashboard locks the Release tab behind a password prompt. `POST /api/release/unlock` verifies the password from `AB2_RELEASE_PASSWORD` (default `123456`) and returns a 12-hour in-memory token; release-channel tasks without a valid token are rejected with 403, and the token is stripped before the task reaches the Agent or database. Scheduled builds run on the Agent and are not affected.
+
 ## 接入其他机器的 Agent
 
 1. 在 Manager 机器上运行 `run_manager.bat`，确认 Manager 监听 `0.0.0.0:8000`。

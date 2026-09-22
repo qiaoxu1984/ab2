@@ -60,6 +60,8 @@ class BuildRequest(BaseModel):
     project_id: str
     channel: str = ""
     branch: str
+    # Carry the release unlock token; it is checked and stripped before dispatch.
+    release_token: str = ""
 
 
 class TaskEvent(BaseModel):
