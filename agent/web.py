@@ -114,7 +114,8 @@ class AgentWebHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
         engine_path = self._find_unity(version)
-        return {"id": path.name.lower().replace(" ", "-"), "name": path.name, "path": str(path), "unity_version": version, "engine": "Tuanjie" if engine_path and "tuanjie" in engine_path.lower() else "Unity", "platforms": self._detect_platforms(path), "unity_path": engine_path, "log_path": str(path / "Log" / "AB2-build.log"), "default_branch": branch, "channels": []}
+        # Use the normalized full path as the project id so two same-named folders stay distinct.
+        return {"id": AgentConfig.project_id(str(path)), "name": path.name, "path": str(path), "unity_version": version, "engine": "Tuanjie" if engine_path and "tuanjie" in engine_path.lower() else "Unity", "platforms": self._detect_platforms(path), "unity_path": engine_path, "log_path": str(path / "Log" / "AB2-build.log"), "default_branch": branch, "channels": []}
 
     def _detect_platforms(self, project_path: Path) -> list[str]:
         """Read project settings and package metadata to determine configured platforms."""
@@ -159,13 +160,21 @@ class AgentWebHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         try:
             payload = json.loads(self.rfile.read(length) or b"{}")
+            projects = payload.get("projects", [])
+            for project in projects:
+                # Keep the stored id equal to the normalized path so one folder maps to one project.
+                if project.get("path"):
+                    project["id"] = AgentConfig.project_id(project["path"])
+            # Reject duplicate ids before saving so two cards cannot share one project again.
+            ids = [project.get("id", "") for project in projects]
+            if len(ids) != len(set(ids)):
+                raise ValueError("duplicate project id")
             self.config.data["id"] = str(payload.get("id", self.config.data["id"]))
             self.config.data["name"] = str(payload.get("name", self.config.data["name"]))
-            for project in payload.get("projects", []):
+            for project in projects:
                 self.config.save_project(project)
-            self.config.data["projects"] = payload.get("projects", [])
-            self.config.path.parent.mkdir(parents=True, exist_ok=True)
-            self.config.path.write_text(json.dumps(self.config.data, indent=2), encoding="utf-8")
+            self.config.data["projects"] = projects
+            self.config.write()
             self._write_json({"ok": True})
         except (ValueError, TypeError, json.JSONDecodeError) as error:
             self._write_json({"ok": False, "error": str(error)}, 400)

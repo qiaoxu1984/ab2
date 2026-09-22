@@ -13,11 +13,53 @@ class AgentConfig:
     DEFAULT_AB2_VERSION = "3800"
 
     def __init__(self, path: str):
-        """Load existing JSON or initialize an empty Agent configuration."""
+        """Load existing JSON, migrate legacy project ids, and initialize defaults."""
         self.path = Path(path)
         self.data: dict[str, Any] = {"id": "", "name": "", "projects": []}
         if self.path.is_file():
             self.data.update(json.loads(self.path.read_text(encoding="utf-8")))
+            # Rewrite folder-name ids to full paths so same-named project folders cannot collide.
+            if self._migrate_project_ids():
+                self.write()
+
+    @staticmethod
+    def project_id(project_path: str) -> str:
+        """Derive the stable project id from a normalized full path.
+
+        Use forward slashes and lower case so Windows separators and letter case
+        cannot split one project into two identities.
+        """
+        return str(project_path).replace("\\", "/").lower()
+
+    def _migrate_project_ids(self) -> bool:
+        """Rewrite every legacy project id to its path form and break remaining ties.
+
+        Returns True when the in-memory configuration changed and needs saving.
+        """
+        changed = False
+        used: set[str] = set()
+        for project in self.data.get("projects", []):
+            project_path = project.get("path", "")
+            # Leave entries without a path untouched; save_project rejects them later.
+            if not project_path:
+                continue
+            new_id = self.project_id(project_path)
+            # Two entries that truly point at one path only get a numeric suffix.
+            base_id = new_id
+            suffix = 2
+            while new_id in used:
+                new_id = f"{base_id}-{suffix}"
+                suffix += 1
+            used.add(new_id)
+            if project.get("id") != new_id:
+                project["id"] = new_id
+                changed = True
+        return changed
+
+    def write(self) -> None:
+        """Persist the in-memory Agent configuration as formatted JSON."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
 
     def save_project(self, project: dict[str, Any]) -> None:
         """Validate and persist one project without silently overwriting another."""
@@ -39,8 +81,11 @@ class AgentConfig:
                 raise ValueError("invalid Unity build method")
         project_ids = [item.get("id") for item in self.data["projects"]]
         if project["id"] in project_ids:
+            existing = self.data["projects"][project_ids.index(project["id"])]
+            # Reject an id that is already bound to a different project path.
+            if existing.get("path") != project.get("path"):
+                raise ValueError("project id already used by another project")
             self.data["projects"][project_ids.index(project["id"])] = project
         else:
             self.data["projects"].append(project)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
+        self.write()
