@@ -79,6 +79,13 @@ class AgentConfig:
                 raise ValueError("invalid AB2 resource version")
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", channel.get("build_method", "")):
                 raise ValueError("invalid Unity build method")
+        # Optional daily schedule: a boolean switch plus a local HH:MM trigger time.
+        schedule = project.get("schedule") or {}
+        if schedule:
+            if not isinstance(schedule.get("enabled", False), bool):
+                raise ValueError("schedule enabled must be a boolean")
+            if schedule.get("enabled") and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", str(schedule.get("time", ""))):
+                raise ValueError("schedule time must be HH:MM")
         project_ids = [item.get("id") for item in self.data["projects"]]
         if project["id"] in project_ids:
             existing = self.data["projects"][project_ids.index(project["id"])]

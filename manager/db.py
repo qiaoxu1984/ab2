@@ -72,6 +72,18 @@ class Database:
             )
         return task_id
 
+    def register_task(self, task: dict[str, Any], agent_id: str) -> None:
+        """Persist an Agent-owned scheduled task so its events attach to a real row."""
+        if not task.get("task_id"):
+            return
+        with self.lock, self.connection:
+            # Repeated registration after a reconnect must not create a second row.
+            self.connection.execute(
+                "INSERT OR IGNORE INTO tasks(id,agent_id,project_id,channel,branch,status,created_at) VALUES(?,?,?,?,?,?,?)",
+                (task["task_id"], agent_id, task.get("project_id", ""), task.get("channel", ""),
+                 task.get("branch", ""), "queued", time.time()),
+            )
+
     def get_task(self, task_id: str) -> dict[str, Any] | None:
         """Return one task with its ordered logs and artifacts."""
         with self.lock:

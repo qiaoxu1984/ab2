@@ -86,7 +86,11 @@ async def create_task(request: BuildRequest) -> dict[str, str]:
         payload["channel"] = ((project or {}).get("channels") or [{}])[0].get("name", "")
     if not payload["channel"]:
         raise HTTPException(status_code=400, detail="project has no configured channel")
-    task_id = state.db.create_task(payload)
+    try:
+        task_id = state.db.create_task(payload)
+    except ValueError as error:
+        # The per-project exclusivity check must surface as a client error, not a server crash.
+        raise HTTPException(status_code=409, detail=str(error))
     try:
         await state.send(request.agent_id, message("build_task", task_id=task_id, **payload))
     except Exception:
@@ -196,6 +200,10 @@ async def agent_socket(socket: WebSocket) -> None:
                 connection.info = agent
                 state.connections[agent_id] = connection
                 await socket.send_json(message("registered", server_time=time.time()))
+            elif data.get("type") == "task_created":
+                # Agent-side scheduled builds register themselves before streaming events.
+                if agent_id:
+                    state.db.register_task(data.get("task") or {}, agent_id)
             elif data.get("type") == "event":
                 state.db.apply_event(data["event"])
     except WebSocketDisconnect:

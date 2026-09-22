@@ -8,6 +8,7 @@ import re
 import socket
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,13 @@ from agent.config import AgentConfig
 from agent.executor import BuildExecutor
 from agent.git import run_git
 from agent.web import start_config_server
+
+
+def schedule_due(schedule: dict[str, Any], now: datetime) -> bool:
+    """Return True when an enabled daily schedule matches the current minute."""
+    if not schedule.get("enabled"):
+        return False
+    return str(schedule.get("time", "")) == now.strftime("%H:%M")
 
 
 class AgentService:
@@ -32,6 +40,11 @@ class AgentService:
         if not self.config.data["name"]:
             self.config.data["name"] = socket.gethostname()
         self.socket = None
+        # Track Manager reachability so scheduled builds can decide whether to stream events.
+        self.connected = False
+        # Remember one fired date per project and every project with a running build.
+        self.scheduled_dates: dict[str, str] = {}
+        self.active_projects: set[str] = set()
         self.executor = BuildExecutor(lambda event: None)
         self.task_cancellations: dict[str, threading.Event] = {}
         self.web_server = start_config_server(self.config, web_host, web_port, Path(__file__).with_name("config.html"))
@@ -42,12 +55,16 @@ class AgentService:
         projects = []
         for project in self.config.data["projects"]:
             item = dict(project)
-            code, output = run_git(project["path"], "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes")
-            item["branches"] = sorted({line.removeprefix("origin/") for line in output.splitlines() if code == 0 and line.strip()})
+            item["branches"] = self._branches(project)
             # Return only the configured default branch when a channel uses the default filter.
             item["channel_branches"] = {channel["name"]: self._filter_branches(item["branches"], channel.get("branch_filter", "all_dev"), project.get("default_branch", "")) for channel in project.get("channels", [])}
             projects.append(item)
         return {"id": local_ip, "name": self.config.data["name"], "ip": local_ip, "platform": platform.system(), "hostname": socket.gethostname(), "version": "0.1.0", "projects": projects}
+
+    def _branches(self, project: dict[str, Any]) -> list[str]:
+        """Return the local and remote branch names reported for one project."""
+        code, output = run_git(project["path"], "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes")
+        return sorted({line.removeprefix("origin/") for line in output.splitlines() if code == 0 and line.strip()})
 
     def _local_ip(self) -> str:
         """Resolve the LAN address used as the stable Agent identity."""
@@ -104,16 +121,102 @@ class AgentService:
         return result
 
     async def run(self) -> None:
-        """Reconnect forever and keep the Agent available through transient outages."""
+        """Reconnect forever while the local scheduler keeps running without Manager."""
+        # The scheduler owns Agent-side daily builds, so it must not live inside the connection loop.
+        scheduler = asyncio.create_task(self._schedule_loop())
+        try:
+            while True:
+                try:
+                    async with connect(self.manager_url) as socket_connection:
+                        self.socket = socket_connection
+                        await socket_connection.send(json.dumps({"type": "register", "agent": self.identity()}))
+                        self.connected = True
+                        await self._receive_loop(socket_connection)
+                except Exception as error:
+                    print(f"Manager connection lost: {error}")
+                    await asyncio.sleep(3)
+                finally:
+                    # Scheduled events are dropped rather than queued while the Manager is unreachable.
+                    self.connected = False
+        finally:
+            scheduler.cancel()
+
+    def _due_schedules(self, now: datetime) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+        """Return every project whose daily schedule fires at this minute."""
+        due: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        today = now.strftime("%Y-%m-%d")
+        for project in list(self.config.data.get("projects", [])):
+            if not schedule_due(project.get("schedule") or {}, now):
+                continue
+            # One run per project per day; a build already running also blocks the trigger.
+            if self.scheduled_dates.get(project["id"]) == today or project["id"] in self.active_projects:
+                continue
+            channel = next((item for item in project.get("channels", []) if item.get("enabled", True)), None)
+            if not channel:
+                continue
+            self.scheduled_dates[project["id"]] = today
+            due.append((project, channel))
+        return due
+
+    async def _schedule_loop(self) -> None:
+        """Fire enabled daily project schedules on the Agent's own clock."""
         while True:
+            for project, channel in self._due_schedules(datetime.now()):
+                asyncio.create_task(self._run_scheduled(project, channel))
+            await asyncio.sleep(20)
+
+    async def _run_scheduled(self, project: dict[str, Any], channel: dict[str, Any]) -> None:
+        """Run one Agent-triggered daily build and stream it to Manager when connected."""
+        options = self._filter_branches(self._branches(project), channel.get("branch_filter", "all_dev"), project.get("default_branch", ""))
+        if not options:
+            print(f"schedule skipped {project['id']}: no branch matches the channel filter")
+            return
+        task = {"task_id": uuid.uuid4().hex[:12], "project_id": project["id"], "channel": channel.get("name", ""), "branch": options[0]}
+        if self.connected and self.socket is not None:
             try:
-                async with connect(self.manager_url) as socket_connection:
-                    self.socket = socket_connection
-                    await socket_connection.send(json.dumps({"type": "register", "agent": self.identity()}))
-                    await self._receive_loop(socket_connection)
-            except Exception as error:
-                print(f"Manager connection lost: {error}")
-                await asyncio.sleep(3)
+                # Register the Agent-owned task so Manager persistence accepts its follow-up events.
+                await self.socket.send(json.dumps({"type": "task_created", "task": task}))
+            except Exception:
+                # A failed registration must not stop the local scheduled build.
+                self.connected = False
+        self.active_projects.add(project["id"])
+        loop = asyncio.get_running_loop()
+        events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        cancellation = threading.Event()
+        self.task_cancellations[task["task_id"]] = cancellation
+        self.executor.set_emitter(task["task_id"], lambda event: loop.call_soon_threadsafe(events.put_nowait, event))
+        try:
+            build_future = loop.run_in_executor(None, self.executor.run, task, project, channel, cancellation)
+            await self._consume_events(events, self._send_event_when_connected)
+            await build_future
+        finally:
+            self.active_projects.discard(project["id"])
+            self.task_cancellations.pop(task["task_id"], None)
+            self.executor.clear_emitter(task["task_id"])
+
+    async def _send_event_when_connected(self, event: dict[str, Any]) -> None:
+        """Forward a scheduled-task event, dropping it while the Manager is offline."""
+        if not self.connected or self.socket is None:
+            return
+        try:
+            await self._send_event(self.socket, event)
+        except Exception:
+            # A dying socket must not abort the local scheduled build.
+            self.connected = False
+
+    async def _consume_events(self, events: asyncio.Queue[dict[str, Any]], send: Any) -> None:
+        """Forward build events until the terminal analysis event arrives."""
+        terminal_status = ""
+        while True:
+            event = await events.get()
+            if event.get("kind") == "analysis_done":
+                break
+            await send(event)
+            if event.get("kind") == "status" and event.get("status") in ("success", "failed", "cancelled"):
+                terminal_status = event.get("status", "")
+            # Successful builds always have an analysis; cancellation before AB has none.
+            if terminal_status == "cancelled":
+                break
 
     async def _receive_loop(self, socket_connection: Any) -> None:
         """Handle Manager commands and send periodic heartbeats on one socket."""
@@ -152,26 +255,20 @@ class AgentService:
             await self._send_event(socket_connection, {"task_id": task["task_id"], "kind": "status", "status": "failed", "message": "project or channel not configured", "sequence": 1})
             return
 
+        self.active_projects.add(project["id"])
         loop = asyncio.get_running_loop()
         events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         cancellation = threading.Event()
         self.task_cancellations[task["task_id"]] = cancellation
         self.executor.set_emitter(task["task_id"], lambda event: loop.call_soon_threadsafe(events.put_nowait, event))
-        build_future = loop.run_in_executor(None, self.executor.run, task, project, channel, cancellation)
-        terminal_status = ""
-        while True:
-            event = await events.get()
-            if event.get("kind") == "analysis_done":
-                break
-            await self._send_event(socket_connection, event)
-            if event.get("kind") == "status" and event.get("status") in ("success", "failed", "cancelled"):
-                terminal_status = event.get("status", "")
-            # Successful builds always have an analysis; cancellation before AB has none.
-            if terminal_status == "cancelled":
-                break
-        await build_future
-        self.task_cancellations.pop(task["task_id"], None)
-        self.executor.clear_emitter(task["task_id"])
+        try:
+            build_future = loop.run_in_executor(None, self.executor.run, task, project, channel, cancellation)
+            await self._consume_events(events, lambda event: self._send_event(socket_connection, event))
+            await build_future
+        finally:
+            self.active_projects.discard(project["id"])
+            self.task_cancellations.pop(task["task_id"], None)
+            self.executor.clear_emitter(task["task_id"])
 
     async def _send_event(self, socket_connection: Any, event: dict[str, Any]) -> None:
         """Send one task event using the protocol envelope."""

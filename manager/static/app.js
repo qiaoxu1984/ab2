@@ -50,12 +50,12 @@ async function loadAgents() {
   const agents = await fetch('/api/agents').then(response => response.json());
   // Avoid rebuilding the DOM when only task status changed, which prevents visible flicker.
   const agentSnapshot = JSON.stringify(agents);
-  if (agentSnapshot === lastAgentSnapshot) return;
-  lastAgentSnapshot = agentSnapshot;
-  // Remove stale channel references when an Agent or project disappears from the live snapshot.
-  Object.keys(projectData).forEach(key => delete projectData[key]);
-  // The API contains only live connections, so every rendered machine is currently online.
-  document.querySelector('#agents').innerHTML = agents.map(agent => {
+  if (agentSnapshot !== lastAgentSnapshot) {
+    lastAgentSnapshot = agentSnapshot;
+    // Remove stale channel references when an Agent or project disappears from the live snapshot.
+    Object.keys(projectData).forEach(key => delete projectData[key]);
+    // The API contains only live connections, so every rendered machine is currently online.
+    document.querySelector('#agents').innerHTML = agents.map(agent => {
     const cards = agent.projects.map(project => (project.channels || []).map((channel, index) => {
       const key = ('p_' + agent.id + '_' + project.id + '_' + (channel.name || channel.switch_to || index)).replace(/[^A-Za-z0-9_-]/g, '_');
       const channelName = channel.name || channel.switch_to;
@@ -69,8 +69,10 @@ async function loadAgents() {
     })).flat(2).join('');
     return `<details class="machine-group online" open><summary><span class="machine-name">${esc(agent.name)}</span><span class="machine-status">在线</span><span class="machine-meta">${esc(agent.hostname)} · ${esc(agent.platform)}</span></summary><div class="machine-channels">${cards || '暂无已配置渠道'}</div></details>`;
   }).join('') || '暂无已配置渠道';
-   setBuildType(activeBuildType);
-   restoreLatestTasks();
+    setBuildType(activeBuildType);
+  }
+  // Agent-side scheduled builds appear without any dashboard action, so always restore newest tasks.
+  restoreLatestTasks();
 }
 
 async function restoreLatestTasks() {
