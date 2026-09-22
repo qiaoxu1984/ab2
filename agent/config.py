@@ -70,7 +70,7 @@ class AgentConfig:
             if channel.get("switch_to", "").rsplit("_", 1)[-1] not in ("dev", "release"):
                 raise ValueError("channel switch_to must end with dev or release")
             # Allow a channel to lock builds to the project's configured default branch.
-            if channel.get("branch_filter", "all_dev") not in ("default", "all_dev", "all_feature", "month_dev", "month_feature"):
+            if channel.get("branch_filter", "all_dev") not in ("default", "all_dev", "all_feature", "month_dev", "month_feature", "harmony"):
                 raise ValueError("invalid branch filter")
             if channel.get("platform") not in ("Android", "iOS", "OpenHarmony", "HarmonyOS"):
                 raise ValueError("channel platform must be detected as Android, iOS, or OpenHarmony")

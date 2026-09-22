@@ -65,6 +65,13 @@ class AgentService:
         # Default mode intentionally does not apply the date-based branch naming rule.
         if branch_filter == "default":
             return [default_branch] if default_branch and default_branch in branches else []
+        # Harmony mode lists only branches marked with 鸿蒙 and keeps the project default first.
+        if branch_filter == "harmony":
+            matched = [branch for branch in branches if "鸿蒙" in branch]
+            if default_branch in matched:
+                matched.remove(default_branch)
+                matched.insert(0, default_branch)
+            return matched
         now = datetime.now()
         current_month_index = now.year * 12 + now.month - 1
         allowed_months = {(((current_month_index - offset) // 12) % 100, (current_month_index - offset) % 12 + 1) for offset in range(3)}
