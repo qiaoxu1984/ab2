@@ -220,15 +220,25 @@ class BuildExecutor:
         if method == "HLS_Editor.ExportEditor.BuildFromAB2" and ab2_version:
             command.extend(["-ab2Version", str(ab2_version)])
         Path(project["log_path"]).parent.mkdir(parents=True, exist_ok=True)
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+        # Do not wait for Unity's stdout pipe: Unity child processes can inherit it
+        # after the main process exits and otherwise leave the build worker blocked
+        # forever without starting failure analysis.
+        process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
         with self.process_lock:
             self.processes[task_id] = process
-        assert process.stdout is not None
-        for line in process.stdout:
-            if cancel_event and cancel_event.is_set():
+        try:
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    process.terminate()
+                    raise RuntimeError("build cancellation requested")
+                try:
+                    exit_code = process.wait(timeout=10)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        finally:
+            if process.poll() is None and cancel_event and cancel_event.is_set():
                 process.terminate()
-                raise RuntimeError("build cancellation requested")
-        exit_code = process.wait()
         with self.process_lock:
             self.processes.pop(task_id, None)
         # AB success is defined by the fresh Diff manifest, not Unity's textual shutdown output.
