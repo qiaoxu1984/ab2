@@ -5,6 +5,9 @@ let lastAgentSnapshot = '';
 // Keep the selected build type in memory so refreshing Agent data preserves the active tab.
 let activeBuildType = 'dev';
 const projectData = {};
+// Pin the shared packaging machine and the daily Android test project to the top.
+const FIRST_MACHINE_NAME = '公共打包机';
+const FIRST_PROJECT_NAME = '【测试】【安卓】';
 
 function esc(value) {
   /* Escape server values before inserting them into the dashboard. */
@@ -55,8 +58,14 @@ async function loadAgents() {
     // Remove stale channel references when an Agent or project disappears from the live snapshot.
     Object.keys(projectData).forEach(key => delete projectData[key]);
     // The API contains only live connections, so every rendered machine is currently online.
-    document.querySelector('#agents').innerHTML = agents.map(agent => {
-    const cards = agent.projects.map(project => (project.channels || []).map((channel, index) => {
+    // Show the shared machine first and keep Android channels first inside every machine.
+    const orderedAgents = [...agents].sort((left, right) => (left.name === FIRST_MACHINE_NAME ? 0 : 1) - (right.name === FIRST_MACHINE_NAME ? 0 : 1));
+    document.querySelector('#agents').innerHTML = orderedAgents.map(agent => {
+    const channelCards = agent.projects.flatMap(project => (project.channels || []).map((channel, index) => ({ project, channel, index })));
+    // Rank: pinned project first, then Android channels, then everything else.
+    const cardRank = card => card.project.name === FIRST_PROJECT_NAME ? 0 : card.channel.platform === 'Android' ? 1 : 2;
+    channelCards.sort((left, right) => cardRank(left) - cardRank(right));
+    const cards = channelCards.map(({ project, channel, index }) => {
       const key = ('p_' + agent.id + '_' + project.id + '_' + (channel.name || channel.switch_to || index)).replace(/[^A-Za-z0-9_-]/g, '_');
       const channelName = channel.name || channel.switch_to;
       const branches = (project.channel_branches || {})[channelName] || [];
@@ -66,7 +75,7 @@ async function loadAgents() {
       projectData[key] = { ...(projectData[key] || {}), agent_id: agent.id, project_id: project.id, channel: channelName, branch_filter: channel.branch_filter || 'all_dev', default_branch: project.default_branch || '' };
        const buildType = getBuildType(channel);
        return `<div class="channel-card" data-build-type="${buildType}"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="channel-meta">资源版本：${esc(channel.ab2_version || '3800')}</div><div class="channel-actions"><select id="branch-${key}" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
-    })).flat(2).join('');
+    }).join('');
     return `<details class="machine-group online" open><summary><span class="machine-name">${esc(agent.name)}</span><span class="machine-status">在线</span><span class="machine-meta">${esc(agent.hostname)} · ${esc(agent.platform)}</span></summary><div class="machine-channels">${cards || '暂无已配置渠道'}</div></details>`;
   }).join('') || '暂无已配置渠道';
     setBuildType(activeBuildType);

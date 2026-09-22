@@ -45,6 +45,8 @@ class AgentService:
         # Remember one fired date per project and every project with a running build.
         self.scheduled_dates: dict[str, str] = {}
         self.active_projects: set[str] = set()
+        # Keep scheduled tasks in memory so a late Manager connection can still record them.
+        self.local_tasks: dict[str, dict[str, Any]] = {}
         self.executor = BuildExecutor(lambda event: None)
         self.task_cancellations: dict[str, threading.Event] = {}
         self.web_server = start_config_server(self.config, web_host, web_port, Path(__file__).with_name("config.html"))
@@ -131,6 +133,8 @@ class AgentService:
                         self.socket = socket_connection
                         await socket_connection.send(json.dumps({"type": "register", "agent": self.identity()}))
                         self.connected = True
+                        # Scheduled builds that started before this connection must still be recorded.
+                        await self._register_local_tasks(socket_connection)
                         await self._receive_loop(socket_connection)
                 except Exception as error:
                     print(f"Manager connection lost: {error}")
@@ -172,6 +176,8 @@ class AgentService:
             print(f"schedule skipped {project['id']}: no branch matches the channel filter")
             return
         task = {"task_id": uuid.uuid4().hex[:12], "project_id": project["id"], "channel": channel.get("name", ""), "branch": options[0]}
+        # Hold the payload until the build ends so the connection loop can retry registration.
+        self.local_tasks[task["task_id"]] = task
         if self.connected and self.socket is not None:
             try:
                 # Register the Agent-owned task so Manager persistence accepts its follow-up events.
@@ -190,9 +196,19 @@ class AgentService:
             await self._consume_events(events, self._send_event_when_connected)
             await build_future
         finally:
+            self.local_tasks.pop(task["task_id"], None)
             self.active_projects.discard(project["id"])
             self.task_cancellations.pop(task["task_id"], None)
             self.executor.clear_emitter(task["task_id"])
+
+    async def _register_local_tasks(self, socket_connection: Any) -> None:
+        """Register scheduled builds that started before the Manager was reachable."""
+        for task in list(self.local_tasks.values()):
+            try:
+                await socket_connection.send(json.dumps({"type": "task_created", "task": task}))
+            except Exception:
+                # Stop retrying on a broken socket; the next connection tries again.
+                return
 
     async def _send_event_when_connected(self, event: dict[str, Any]) -> None:
         """Forward a scheduled-task event, dropping it while the Manager is offline."""
