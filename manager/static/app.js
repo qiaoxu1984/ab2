@@ -8,6 +8,8 @@ const projectData = {};
 // Pin the shared packaging machine and the daily Android test project to the top.
 const FIRST_MACHINE_NAME = '公共打包机';
 const FIRST_PROJECT_NAME = '【测试】【安卓】';
+// Hold the release unlock token for this page session only.
+let releaseToken = '';
 
 function esc(value) {
   /* Escape server values before inserting them into the dashboard. */
@@ -26,9 +28,21 @@ function getBuildType(channel) {
   return suffix === 'release' ? 'release' : 'dev';
 }
 
-function setBuildType(buildType) {
+async function setBuildType(buildType) {
   /* Switch between development and release channels without reloading the page. */
-  activeBuildType = buildType === 'release' ? 'release' : 'dev';
+  const wanted = buildType === 'release' ? 'release' : 'dev';
+  // Release channels stay locked until the Manager verifies the release password.
+  if (wanted === 'release' && !releaseToken) {
+    const password = window.prompt('请输入正式包口令');
+    if (!password) return;
+    const unlock = await fetch('/api/release/unlock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password }) });
+    // A missing endpoint means the Manager process predates the release gate.
+    if (unlock.status === 404) { window.alert('Manager 未加载口令接口，请重启 Manager 后重试'); return; }
+    if (!unlock.ok) { window.alert('口令错误，无法切换到 Release'); return; }
+    releaseToken = (await unlock.json()).token || '';
+    if (!releaseToken) { window.alert('口令校验失败，无法切换到 Release'); return; }
+  }
+  activeBuildType = wanted;
   document.querySelectorAll('.build-tab').forEach(tab => {
     const selected = tab.dataset.buildType === activeBuildType;
     tab.classList.toggle('active', selected);
@@ -109,8 +123,14 @@ async function buildProject(key) {
   // Use the project default branch directly when the channel locks branch selection.
   const branch = data.branch_filter === 'default' ? data.default_branch : document.querySelector('#branch-' + key)?.value;
   if (!data || !branch) return;
-  const response = await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...data, branch }) });
+  const response = await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...data, branch, release_token: releaseToken }) });
   const result = await response.json();
+  if (response.status === 403) {
+    // The token expired (for example after a Manager restart); require the password again.
+    releaseToken = '';
+    showTaskMessage(key, '正式包口令已失效，请重新切换 Release 页签后重试');
+    return;
+  }
   if (!response.ok) { showTaskMessage(key, '创建任务失败：' + (result.detail || result.error)); return; }
   data.task_id = result.task_id;
   const panel = document.querySelector('[data-channel-phase="' + key + '"]');

@@ -18,6 +18,7 @@ from websockets.asyncio.client import connect
 from agent.config import AgentConfig
 from agent.executor import BuildExecutor
 from agent.git import run_git
+from agent.notify import build_feishu_text, send_feishu_text
 from agent.web import start_config_server
 
 
@@ -186,6 +187,7 @@ class AgentService:
                 # A failed registration must not stop the local scheduled build.
                 self.connected = False
         self.active_projects.add(project["id"])
+        started = time.time()
         loop = asyncio.get_running_loop()
         events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         cancellation = threading.Event()
@@ -193,8 +195,10 @@ class AgentService:
         self.executor.set_emitter(task["task_id"], lambda event: loop.call_soon_threadsafe(events.put_nowait, event))
         try:
             build_future = loop.run_in_executor(None, self.executor.run, task, project, channel, cancellation)
-            await self._consume_events(events, self._send_event_when_connected)
+            status, message, commit_sha = await self._consume_events(events, self._send_event_when_connected)
             await build_future
+            # Scheduled builds notify through the same channel switch as manual builds.
+            await self._notify(project, channel, task.get("branch", ""), commit_sha, status, message, started)
         finally:
             self.local_tasks.pop(task["task_id"], None)
             self.active_projects.discard(project["id"])
@@ -220,19 +224,45 @@ class AgentService:
             # A dying socket must not abort the local scheduled build.
             self.connected = False
 
-    async def _consume_events(self, events: asyncio.Queue[dict[str, Any]], send: Any) -> None:
-        """Forward build events until the terminal analysis event arrives."""
+    async def _consume_events(self, events: asyncio.Queue[dict[str, Any]], send: Any) -> tuple[str, str, str]:
+        """Forward build events until the terminal analysis event arrives.
+
+        Returns the terminal (status, message, commit_sha) for the notification step.
+        """
         terminal_status = ""
+        terminal_message = ""
+        commit_sha = ""
         while True:
             event = await events.get()
             if event.get("kind") == "analysis_done":
                 break
             await send(event)
+            commit_sha = event.get("commit_sha") or commit_sha
             if event.get("kind") == "status" and event.get("status") in ("success", "failed", "cancelled"):
                 terminal_status = event.get("status", "")
+                terminal_message = event.get("message", "")
             # Successful builds always have an analysis; cancellation before AB has none.
             if terminal_status == "cancelled":
                 break
+        return terminal_status, terminal_message, commit_sha
+
+    async def _notify(self, project: dict[str, Any], channel: dict[str, Any], branch: str, commit_sha: str,
+                      status: str, message: str, started: float) -> None:
+        """Send the Feishu notification for a finished build when the channel enables it."""
+        webhook = str(self.config.data.get("feishu_webhook", "")).strip()
+        if status not in ("success", "failed") or not channel.get("notify_feishu") or not webhook:
+            return
+        text = build_feishu_text(status, project.get("name") or project["id"], channel.get("name", ""), branch,
+                                 commit_sha, time.time() - started, message, self._manager_http_url())
+        try:
+            await asyncio.to_thread(send_feishu_text, webhook, text)
+        except Exception as error:
+            # A notification failure must never change the build result.
+            print(f"feishu notify failed: {error}")
+
+    def _manager_http_url(self) -> str:
+        """Return the Manager dashboard URL derived from the WebSocket address."""
+        return re.sub(r"^ws", "http", self.manager_url).split("/ws")[0] + "/"
 
     async def _receive_loop(self, socket_connection: Any) -> None:
         """Handle Manager commands and send periodic heartbeats on one socket."""
@@ -272,6 +302,7 @@ class AgentService:
             return
 
         self.active_projects.add(project["id"])
+        started = time.time()
         loop = asyncio.get_running_loop()
         events: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         cancellation = threading.Event()
@@ -279,8 +310,9 @@ class AgentService:
         self.executor.set_emitter(task["task_id"], lambda event: loop.call_soon_threadsafe(events.put_nowait, event))
         try:
             build_future = loop.run_in_executor(None, self.executor.run, task, project, channel, cancellation)
-            await self._consume_events(events, lambda event: self._send_event(socket_connection, event))
+            status, message, commit_sha = await self._consume_events(events, lambda event: self._send_event(socket_connection, event))
             await build_future
+            await self._notify(project, channel, task.get("branch", ""), commit_sha, status, message, started)
         finally:
             self.active_projects.discard(project["id"])
             self.task_cancellations.pop(task["task_id"], None)

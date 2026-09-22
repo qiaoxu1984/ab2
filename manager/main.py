@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import secrets
 import time
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,12 @@ class ConfigRequest(BaseModel):
     project: dict[str, Any]
 
 
+class ReleaseUnlock(BaseModel):
+    """Carry the release build password sent by the dashboard."""
+
+    password: str
+
+
 class ManagerState:
     """Own live Agent sockets while durable task state remains in SQLite."""
 
@@ -42,6 +49,19 @@ class ManagerState:
         self.db = Database(str(data_dir / "manager.sqlite3"))
         self.connections: dict[str, AgentConnection] = {}
         self.lock = asyncio.Lock()
+        # Keep release unlock tokens in memory; they expire with the Manager process.
+        self.release_tokens: dict[str, float] = {}
+
+    def valid_release_token(self, token: str) -> bool:
+        """Accept a release token issued within the last 12 hours."""
+        issued = self.release_tokens.get(token or "")
+        return bool(issued and time.time() - issued < 12 * 3600)
+
+    def find_channel(self, agent_id: str, project_id: str, channel_name: str) -> dict[str, Any]:
+        """Locate one configured channel from the live Agent snapshot."""
+        agent = next((item for item in self.live_agents() if item["id"] == agent_id), None)
+        project = next((item for item in (agent or {}).get("projects", []) if item.get("id") == project_id), None)
+        return next((item for item in (project or {}).get("channels", []) if item.get("name") == channel_name), {}) or {}
 
     async def send(self, agent_id: str, payload: dict[str, Any]) -> None:
         """Send a command to an online Agent or fail with a clear API error."""
@@ -76,6 +96,17 @@ async def update_project(agent_id: str, request: ConfigRequest) -> dict[str, boo
     return {"ok": True}
 
 
+@app.post("/api/release/unlock")
+async def unlock_release(request: ReleaseUnlock) -> dict[str, str]:
+    """Validate the release password and issue a short-lived build token."""
+    expected = os.getenv("AB2_RELEASE_PASSWORD", "123456")
+    if not secrets.compare_digest(request.password, expected):
+        raise HTTPException(status_code=403, detail="release password is incorrect")
+    token = secrets.token_hex(16)
+    state.release_tokens[token] = time.time()
+    return {"token": token}
+
+
 @app.post("/api/tasks")
 async def create_task(request: BuildRequest) -> dict[str, str]:
     """Create and dispatch one task while enforcing per-project exclusivity."""
@@ -86,6 +117,12 @@ async def create_task(request: BuildRequest) -> dict[str, str]:
         payload["channel"] = ((project or {}).get("channels") or [{}])[0].get("name", "")
     if not payload["channel"]:
         raise HTTPException(status_code=400, detail="project has no configured channel")
+    # Release channels require the token issued by the release password prompt.
+    channel = state.find_channel(request.agent_id, request.project_id, payload["channel"])
+    if str(channel.get("switch_to", "")).endswith("_release") and not state.valid_release_token(request.release_token):
+        raise HTTPException(status_code=403, detail="release password is required or expired")
+    # The token must never reach the Agent or the task database.
+    payload.pop("release_token", None)
     try:
         task_id = state.db.create_task(payload)
     except ValueError as error:
