@@ -1,7 +1,11 @@
 """Safe Git command adapter used by the Agent build executor."""
 
+import re
 import subprocess
 from typing import Callable
+
+# A suffixed branch like dev/9-2-26_鸿蒙 carries its mainline as the date-encoded prefix.
+MAINLINE_PATTERN = re.compile(r"(?P<mainline>(?:dev|feature)/\d{1,2}-\d{1,2}-\d{2})(?P<suffix>.+)$")
 
 
 def run_git(project_path: str, *args: str) -> tuple[int, str]:
@@ -32,6 +36,37 @@ def sync_branch(project_path: str, branch: str, on_output: Callable[[str], None]
     if code:
         raise RuntimeError(f"cannot resolve commit: {sha}")
     return sha
+
+
+def mainline_branch(branch: str) -> str:
+    """Return the mainline branch behind a suffixed branch name, or an empty string."""
+    name = branch.strip()
+    match = MAINLINE_PATTERN.fullmatch(name)
+    # A plain mainline branch has no suffix and therefore nothing to merge.
+    return match.group("mainline") if match else ""
+
+
+def merge_mainline(project_path: str, mainline: str, on_output: Callable[[str], None] | None = None) -> None:
+    """Merge the fetched origin mainline into the current branch without committing.
+
+    The merge result stays in the worktree and index, so the packed data contains
+    the mainline changes while the local branch keeps its original commit.
+    """
+    if not mainline or mainline.startswith("-"):
+        raise ValueError("invalid mainline branch")
+    code, _ = run_git(project_path, "rev-parse", "--verify", f"refs/remotes/origin/{mainline}")
+    if code:
+        # A missing mainline is a caller-side skip instead of a build failure.
+        raise LookupError(f"origin/{mainline} does not exist")
+    args = ("merge", "--no-ff", "--no-commit", f"origin/{mainline}")
+    code, output = run_git(project_path, *args)
+    if on_output:
+        for line in output.splitlines():
+            on_output(line)
+    if code:
+        # Abort so a conflicted merge cannot leak into the next build.
+        run_git(project_path, "merge", "--abort")
+        raise RuntimeError(f"git {' '.join(args)} failed: {output}")
 
 
 def file_changed(project_path: str, old_sha: str, new_sha: str, file_path: str) -> bool:

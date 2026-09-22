@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from agent.git import run_git, sync_branch
+from agent.git import mainline_branch, merge_mainline, run_git, sync_branch
 from agent.process import close_unity_for_project
 
 
@@ -106,6 +106,9 @@ class BuildExecutor:
             self._event(task_id, "status", sequence, stage=current_stage, message="syncing branch")
             sha = sync_branch(project["path"], task["branch"], lambda line: self._important_log(task_id, sequence, "git", line))
             self._event(task_id, "status", sequence, stage="git", commit_sha=sha, message=f"checked out {sha}")
+            # Optionally pull the updated mainline into a suffixed branch before packing it.
+            if channel.get("sync_mainline"):
+                self._merge_mainline(task_id, project, task, sequence)
             current_stage = "xlua"
             self._wait_before_next_stage()
             self._clear_xlua_gen(project["path"], task_id, sequence)
@@ -127,6 +130,21 @@ class BuildExecutor:
                 self._start_failure_analysis(task_id, task_project, task, sequence)
         finally:
             lock.release()
+
+    def _merge_mainline(self, task_id: str, project: dict[str, Any], task: dict[str, Any], sequence: list[int]) -> None:
+        """Merge the updated origin mainline into a suffixed build branch."""
+        mainline = mainline_branch(task.get("branch", ""))
+        if not mainline:
+            # A plain mainline branch has nothing to merge, so the switch is a no-op.
+            return
+        self._event(task_id, "log", sequence, stage="git", message=f"merging mainline origin/{mainline} into {task['branch']}")
+        try:
+            merge_mainline(project["path"], mainline, lambda line: self._important_log(task_id, sequence, "git", line))
+        except LookupError as error:
+            # A missing mainline is surfaced in the log without failing the build.
+            self._event(task_id, "log", sequence, stage="git", message=f"mainline merge skipped: {error}")
+            return
+        self._event(task_id, "log", sequence, stage="git", message=f"mainline merged: origin/{mainline}")
 
     def _wait_before_next_stage(self) -> None:
         """Leave a short visible gap between successful pipeline stages."""

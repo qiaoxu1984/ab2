@@ -77,6 +77,9 @@ class AgentConfig:
             # Restrict the optional resource version to safe command-line characters.
             if channel.get("ab2_version", "") and not re.fullmatch(r"[A-Za-z0-9_.-]+", str(channel["ab2_version"])):
                 raise ValueError("invalid AB2 resource version")
+            # The mainline sync switch must stay a real boolean.
+            if "sync_mainline" in channel and not isinstance(channel["sync_mainline"], bool):
+                raise ValueError("channel sync_mainline must be a boolean")
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", channel.get("build_method", "")):
                 raise ValueError("invalid Unity build method")
         # Optional daily schedule: a boolean switch plus a local HH:MM trigger time.
