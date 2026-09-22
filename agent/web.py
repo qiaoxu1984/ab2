@@ -171,6 +171,8 @@ class AgentWebHandler(BaseHTTPRequestHandler):
                 raise ValueError("duplicate project id")
             self.config.data["id"] = str(payload.get("id", self.config.data["id"]))
             self.config.data["name"] = str(payload.get("name", self.config.data["name"]))
+            # The optional Feishu bot webhook is shared by every channel on this Agent.
+            self.config.data["feishu_webhook"] = AgentConfig.validate_webhook(payload.get("feishu_webhook", ""))
             for project in projects:
                 self.config.save_project(project)
             self.config.data["projects"] = projects

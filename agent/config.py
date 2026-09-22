@@ -56,6 +56,14 @@ class AgentConfig:
                 changed = True
         return changed
 
+    @staticmethod
+    def validate_webhook(url: str) -> str:
+        """Accept only an empty value or a plain http(s) bot webhook URL."""
+        value = str(url or "").strip()
+        if value and not re.match(r"^https?://", value):
+            raise ValueError("feishu webhook must be an http(s) URL")
+        return value
+
     def write(self) -> None:
         """Persist the in-memory Agent configuration as formatted JSON."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -80,6 +88,9 @@ class AgentConfig:
             # The mainline sync switch must stay a real boolean.
             if "sync_mainline" in channel and not isinstance(channel["sync_mainline"], bool):
                 raise ValueError("channel sync_mainline must be a boolean")
+            # The Feishu notification switch must stay a real boolean.
+            if "notify_feishu" in channel and not isinstance(channel["notify_feishu"], bool):
+                raise ValueError("channel notify_feishu must be a boolean")
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", channel.get("build_method", "")):
                 raise ValueError("invalid Unity build method")
         # Optional daily schedule: a boolean switch plus a local HH:MM trigger time.
