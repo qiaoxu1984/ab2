@@ -308,7 +308,8 @@ class AgentService:
         sequence = [1_000_000]
         self.executor.set_emitter(task_id, lambda event: loop.call_soon_threadsafe(events.put_nowait, event))
         try:
-            self.executor._start_failure_analysis(task_id, task_project, task, sequence)
+            # The stored task status decides whether the report reads as success or failure.
+            self.executor._start_failure_analysis(task_id, task_project, task, sequence, task.get("status", ""))
             while True:
                 event = await events.get()
                 if event.get("kind") == "analysis_done":

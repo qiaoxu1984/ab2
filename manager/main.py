@@ -1,7 +1,6 @@
 """FastAPI Manager for Agent registration, task dispatch, and log viewing."""
 
 import asyncio
-import html
 import os
 import time
 from pathlib import Path
@@ -15,6 +14,7 @@ from pydantic import BaseModel
 from manager.db import Database
 from shared.models import BuildRequest
 from shared.protocol import message
+from shared.report import build_ai_report
 
 
 class AgentConnection:
@@ -134,9 +134,7 @@ async def task_report(task_id: str) -> dict[str, str]:
     else:
         analysis = "\n\n".join(log["message"] for log in result["logs"] if log["stage"] == "analysis" and log["message"] != "__AB2_ANALYSIS_STARTED__")
         (report_dir / f"{task_id}.html").write_text(
-        "<!doctype html><meta charset='utf-8'><title>AB2 AI 分析报告</title>"
-        "<style>body{background:#111827;color:#dbeafe;font:15px system-ui;padding:32px;line-height:1.7}pre{white-space:pre-wrap}</style>"
-        f"<h1>AB2 AI 失败原因分析</h1><p>任务：{html.escape(task_id)}</p><pre>{html.escape(analysis or '暂无分析结果')}</pre>",
+            build_ai_report(result["status"], analysis, f"任务：{task_id}"),
             encoding="utf-8",
         )
     return {"url": f"/reports/{task_id}.html"}

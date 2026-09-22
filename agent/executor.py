@@ -1,7 +1,6 @@
 """Unity AB build execution adapted from the existing asset_builder workflow."""
 
 import json
-import html
 import re
 import shutil
 import subprocess
@@ -12,6 +11,7 @@ from typing import Any, Callable
 
 from agent.git import mainline_branch, merge_mainline, run_git, sync_branch
 from agent.process import close_unity_for_project
+from shared.report import build_ai_report
 
 
 class BuildExecutor:
@@ -122,12 +122,12 @@ class BuildExecutor:
             self._event(task_id, "log", sequence, stage="ab", message="generated Bundles/Diff/PackageManifest_DefaultPackage.version")
             self._event(task_id, "status", sequence, status="success", stage="ab", commit_sha=sha, message="build complete")
             # Always start the AI analysis after the AB stage, including successful builds.
-            self._start_failure_analysis(task_id, task_project, task, sequence)
+            self._start_failure_analysis(task_id, task_project, task, sequence, status="success")
         except Exception as error:
             status = "cancelled" if cancel_event and cancel_event.is_set() else "failed"
             self._event(task_id, "status", sequence, status=status, stage=current_stage, error_code="" if status == "cancelled" else "build_error", message=str(error))
             if status == "failed":
-                self._start_failure_analysis(task_id, task_project, task, sequence)
+                self._start_failure_analysis(task_id, task_project, task, sequence, status="failed")
         finally:
             lock.release()
 
@@ -259,8 +259,11 @@ class BuildExecutor:
         )
         return [line.strip() for line in lines if any(pattern.search(line) for pattern in patterns)]
 
-    def _start_failure_analysis(self, task_id: str, project: dict[str, Any], task: dict[str, Any], sequence: list[int]) -> None:
-        """Start a read-only OpenCode build analysis without blocking the build worker."""
+    def _start_failure_analysis(self, task_id: str, project: dict[str, Any], task: dict[str, Any], sequence: list[int], status: str = "") -> None:
+        """Start a read-only OpenCode build analysis without blocking the build worker.
+
+        The final status selects the green success or red failure report heading.
+        """
         def analyze() -> None:
             """Ask OpenCode to inspect the failed branch and Unity log, then stream its answer."""
             try:
@@ -310,7 +313,7 @@ class BuildExecutor:
                 elif result_count == 0:
                     self._event(task_id, "log", sequence, stage="analysis", message="OpenCode 未返回分析结果")
                 if final_text:
-                    report_html = "<!doctype html><meta charset='utf-8'><title>AB2 AI 分析报告</title><style>body{background:#111827;color:#dbeafe;font:15px system-ui;padding:32px;line-height:1.7}pre{white-space:pre-wrap}</style><h1>AB2 AI 失败原因分析</h1><pre>" + html.escape("\n\n".join(final_text)) + "</pre>"
+                    report_html = build_ai_report(status, "\n\n".join(final_text))
                     report_path = Path(project["path"]) / "AB2Reports" / f"{task_id}.html"
                     report_path.parent.mkdir(parents=True, exist_ok=True)
                     report_path.write_text(report_html, encoding="utf-8")
