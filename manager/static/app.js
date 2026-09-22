@@ -11,16 +11,6 @@ function esc(value) {
   return String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
 }
 
-function branchKey(key) {
-  /* Return the stable browser storage key for one Agent/project/channel. */
-  return 'ab2.last-branch.' + key;
-}
-
-function rememberBranch(key, branch) {
-  /* Persist the last selected branch without storing build configuration. */
-  if (branch) localStorage.setItem(branchKey(key), branch);
-}
-
 function setChannelAction(key, running) {
   /* Hide the build action while this channel has an active task. */
   const build = document.querySelector('#build-' + key);
@@ -71,11 +61,11 @@ async function loadAgents() {
       const channelName = channel.name || channel.switch_to;
       const branches = (project.channel_branches || {})[channelName] || [];
       const usesDefaultBranch = channel.branch_filter === 'default';
-      const saved = localStorage.getItem(branchKey(key));
-      const selected = usesDefaultBranch ? (project.default_branch || branches[0] || '') : (branches.includes(saved) ? saved : (branches[0] || ''));
+      // The Agent sorts branches newest first, so a rebuilt card preselects the newest version.
+      const selected = usesDefaultBranch ? (project.default_branch || branches[0] || '') : (branches[0] || '');
       projectData[key] = { ...(projectData[key] || {}), agent_id: agent.id, project_id: project.id, channel: channelName, branch_filter: channel.branch_filter || 'all_dev', default_branch: project.default_branch || '' };
        const buildType = getBuildType(channel);
-       return `<div class="channel-card" data-build-type="${buildType}"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="channel-meta">资源版本：${esc(channel.ab2_version || '3800')}</div><div class="channel-actions"><select id="branch-${key}" onchange="rememberBranch('${key}',this.value)" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
+       return `<div class="channel-card" data-build-type="${buildType}"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="channel-meta">资源版本：${esc(channel.ab2_version || '3800')}</div><div class="channel-actions"><select id="branch-${key}" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
     })).flat(2).join('');
     return `<details class="machine-group online" open><summary><span class="machine-name">${esc(agent.name)}</span><span class="machine-status">在线</span><span class="machine-meta">${esc(agent.hostname)} · ${esc(agent.platform)}</span></summary><div class="machine-channels">${cards || '暂无已配置渠道'}</div></details>`;
   }).join('') || '暂无已配置渠道';

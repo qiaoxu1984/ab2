@@ -60,18 +60,25 @@ class AgentService:
         finally:
             probe.close()
 
+    @staticmethod
+    def _branch_version(branch: str) -> tuple[int, int, int]:
+        """Extract the numeric (year, month, day) version encoded in a branch name."""
+        match = re.match(r"(?:dev|feature)/(\d{1,2})-(\d{1,2})-(\d{2})", branch)
+        if not match:
+            # Unparseable names sort behind every real version.
+            return (-1, -1, -1)
+        month, day, year = (int(part) for part in match.groups())
+        return (year, month, day)
+
     def _filter_branches(self, branches: list[str], branch_filter: str, default_branch: str = "") -> list[str]:
-        """Return the configured default branch or standard branches from recent months."""
+        """Return the configured default branch or newest branches for the filter."""
         # Default mode intentionally does not apply the date-based branch naming rule.
         if branch_filter == "default":
             return [default_branch] if default_branch and default_branch in branches else []
-        # Harmony mode lists only branches marked with 鸿蒙 and keeps the project default first.
+        # Harmony mode lists only dev branches marked with 鸿蒙.
         if branch_filter == "harmony":
-            matched = [branch for branch in branches if "鸿蒙" in branch]
-            if default_branch in matched:
-                matched.remove(default_branch)
-                matched.insert(0, default_branch)
-            return matched
+            matched = [branch for branch in branches if branch.startswith("dev/") and "鸿蒙" in branch]
+            return sorted(matched, key=self._branch_version, reverse=True)
         now = datetime.now()
         current_month_index = now.year * 12 + now.month - 1
         allowed_months = {(((current_month_index - offset) // 12) % 100, (current_month_index - offset) % 12 + 1) for offset in range(3)}
@@ -92,6 +99,8 @@ class AgentService:
             if branch_filter == "month_feature" and (kind != "feature" or int(month) != now.month or int(year) != now.year % 100):
                 continue
             result.append(branch)
+        # Newest version first so the Manager preselects the latest branch by default.
+        result.sort(key=self._branch_version, reverse=True)
         return result
 
     async def run(self) -> None:
