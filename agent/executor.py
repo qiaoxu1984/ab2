@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from agent.git import mainline_branch, merge_mainline, run_git, sync_branch
 from agent.process import close_unity_for_project
+from agent.ticket import TICKET_MODULE, find_zip_name, is_release_channel, submit_ticket
 from shared.report import build_ai_report
 
 
@@ -121,6 +122,8 @@ class BuildExecutor:
             self._invoke_unity(task_id, task_project, channel["build_method"], sequence, self._agent_type(channel), cancel_event, current_stage, ab2_version)
             self._event(task_id, "log", sequence, stage="ab", message="generated Bundles/Diff/PackageManifest_DefaultPackage.version")
             self._event(task_id, "status", sequence, status="success", stage="ab", commit_sha=sha, message="build complete")
+            # 正式渠道构建成功后自动提交发布工单（同步执行，失败只记日志）。
+            self._submit_release_ticket(task_id, task_project, channel, sequence)
             # Always start the AI analysis after the AB stage, including successful builds.
             self._start_failure_analysis(task_id, task_project, task, sequence, status="success")
         except Exception as error:
@@ -329,6 +332,31 @@ class BuildExecutor:
         # 兜底3：事件中连消息ID都缺失时，只保留最后一段文本，避免把过程说明当成结论
         all_texts = [text for texts in text_by_message.values() for text in texts]
         return all_texts[-1:], event_count, text_count
+
+    def _submit_release_ticket(self, task_id: str, project: dict[str, Any], channel: dict[str, Any], sequence: list[int]) -> None:
+        """Create the release ticket synchronously after a successful build.
+
+        The ticket is an optional follow-up action: every failure is reported as a
+        log event and must never change the already finished build result.
+        """
+        try:
+            # 仅正式渠道建单；开发渠道直接跳过。
+            if not is_release_channel(channel):
+                return
+            # 工单版本号使用 Unity 已上传 SVN 的资源包文件名。
+            zip_name = find_zip_name(project["log_path"])
+            if not zip_name:
+                self._event(task_id, "log", sequence, stage="ticket", message="构建日志中未找到资源包名，已跳过自动建单")
+                return
+            self._event(task_id, "log", sequence, stage="ticket", message=f"开始提交工单: {TICKET_MODULE} {zip_name}")
+            ok, summary = submit_ticket(zip_name)
+            if ok:
+                self._event(task_id, "log", sequence, stage="ticket", message=f"工单提交成功: {summary}")
+            else:
+                self._event(task_id, "log", sequence, stage="ticket", message=f"工单提交失败: {summary}")
+        except Exception as error:
+            # 工单异常绝不能影响已经完成的构建结果。
+            self._event(task_id, "log", sequence, stage="ticket", message=f"工单提交异常: {error}")
 
     def _start_failure_analysis(self, task_id: str, project: dict[str, Any], task: dict[str, Any], sequence: list[int], status: str = "") -> None:
         """Start a read-only OpenCode build analysis without blocking the build worker.
