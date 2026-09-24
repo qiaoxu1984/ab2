@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 # 需求约定：所有 release 渠道的工单固定参数，写死在代码里，不随项目/机器变化。
-TICKET_SUBMITTER = "乔旭"
+TICKET_SUBMITTER = "qiaoxu"
 TICKET_MODULE = "byhls-客户端"
 TICKET_REMARK = "AB2 定向资源发布"
 
