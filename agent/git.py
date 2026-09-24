@@ -7,6 +7,10 @@ from typing import Callable
 # A suffixed branch like dev/9-2-26_鸿蒙 carries its mainline as the date-encoded prefix.
 MAINLINE_PATTERN = re.compile(r"(?P<mainline>(?:dev|feature)/\d{1,2}-\d{1,2}-\d{2})(?P<suffix>.+)$")
 
+# 差异说明的采集上限：明细最多保留最新 80 条、总长不超过 6000 字符，避免飞书消息和 AI 提示词过长。
+MAX_CHANGE_COMMITS = 80
+MAX_CHANGE_CHARS = 6000
+
 
 def run_git(project_path: str, *args: str) -> tuple[int, str]:
     """Run Git without a shell and return its exit code and combined output."""
@@ -81,3 +85,38 @@ def file_changed(project_path: str, old_sha: str, new_sha: str, file_path: str) 
     if code != 0:
         raise RuntimeError(f"cannot inspect Git file change: {output}")
     return any(line.replace("\\", "/") == file_path for line in output.splitlines())
+
+
+def current_revision(project_path: str) -> tuple[str, str]:
+    """Return the checked-out branch and HEAD commit, or empty strings when Git cannot answer."""
+    code, branch = run_git(project_path, "branch", "--show-current")
+    if code or not branch:
+        return "", ""
+    code, sha = run_git(project_path, "rev-parse", "HEAD")
+    if code or not sha:
+        return "", ""
+    return branch, sha
+
+
+def is_ancestor(project_path: str, old_sha: str, new_sha: str) -> bool:
+    """Check whether the baseline commit is still an ancestor of the new revision."""
+    code, _ = run_git(project_path, "merge-base", "--is-ancestor", old_sha, new_sha)
+    return code == 0
+
+
+def revision_changes(project_path: str, old_sha: str, new_sha: str) -> tuple[str, str, int]:
+    """Collect non-merge commits and the diffstat between two revisions for release notes.
+
+    Returns the newest-first commit detail text, the shortstat line, and the untruncated count.
+    """
+    code, output = run_git(project_path, "log", "--no-merges", "--date=format:%m-%d", "--pretty=format:%h %ad %an %s", f"{old_sha}..{new_sha}")
+    if code:
+        raise RuntimeError(f"cannot list revision commits: {output}")
+    commits = [line.strip() for line in output.splitlines() if line.strip()]
+    total = len(commits)
+    # 只保留最新的一批提交，防止极端情况下提示词和飞书消息过长。
+    detail = "\n".join(commits[:MAX_CHANGE_COMMITS])
+    if len(detail) > MAX_CHANGE_CHARS:
+        detail = detail[:MAX_CHANGE_CHARS] + "\n…"
+    code, stat = run_git(project_path, "diff", "--shortstat", old_sha, new_sha)
+    return detail, (stat.strip() if code == 0 else ""), total

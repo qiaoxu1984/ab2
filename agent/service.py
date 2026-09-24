@@ -195,10 +195,10 @@ class AgentService:
         self.executor.set_emitter(task["task_id"], lambda event: loop.call_soon_threadsafe(events.put_nowait, event))
         try:
             build_future = loop.run_in_executor(None, self.executor.run, task, project, channel, cancellation)
-            status, message, commit_sha = await self._consume_events(events, self._send_event_when_connected)
+            status, message, commit_sha, change = await self._consume_events(events, self._send_event_when_connected)
             await build_future
             # Scheduled builds notify through the same channel switch as manual builds.
-            await self._notify(project, channel, task.get("branch", ""), commit_sha, status, message, started)
+            await self._notify(project, channel, task.get("branch", ""), commit_sha, status, message, started, change)
         finally:
             self.local_tasks.pop(task["task_id"], None)
             self.active_projects.discard(project["id"])
@@ -224,18 +224,27 @@ class AgentService:
             # A dying socket must not abort the local scheduled build.
             self.connected = False
 
-    async def _consume_events(self, events: asyncio.Queue[dict[str, Any]], send: Any) -> tuple[str, str, str]:
+    async def _consume_events(self, events: asyncio.Queue[dict[str, Any]], send: Any) -> tuple[str, str, str, dict[str, Any]]:
         """Forward build events until the terminal analysis event arrives.
 
-        Returns the terminal (status, message, commit_sha) for the notification step.
+        Returns the terminal (status, message, commit_sha) and the collected change summary.
         """
         terminal_status = ""
         terminal_message = ""
         commit_sha = ""
+        # 差异说明由 diff / diff_summary 两个事件拼成，最终随飞书通知发出。
+        change: dict[str, Any] = {"raw": "", "stat": "", "count": 0, "note": "", "summary": ""}
         while True:
             event = await events.get()
             if event.get("kind") == "analysis_done":
                 break
+            if event.get("kind") == "diff":
+                change["raw"] = event.get("raw", "")
+                change["stat"] = event.get("stat", "")
+                change["count"] = event.get("count", 0)
+                change["note"] = event.get("note", "")
+            elif event.get("kind") == "diff_summary":
+                change["summary"] = event.get("summary", "")
             await send(event)
             commit_sha = event.get("commit_sha") or commit_sha
             if event.get("kind") == "status" and event.get("status") in ("success", "failed", "cancelled"):
@@ -244,16 +253,20 @@ class AgentService:
             # Successful builds always have an analysis; cancellation before AB has none.
             if terminal_status == "cancelled":
                 break
-        return terminal_status, terminal_message, commit_sha
+        return terminal_status, terminal_message, commit_sha, change
 
     async def _notify(self, project: dict[str, Any], channel: dict[str, Any], branch: str, commit_sha: str,
-                      status: str, message: str, started: float) -> None:
+                      status: str, message: str, started: float, change: dict[str, Any] | None = None) -> None:
         """Send the Feishu notification for a finished build when the channel enables it."""
         webhook = str(self.config.data.get("feishu_webhook", "")).strip()
         if status not in ("success", "failed") or not channel.get("notify_feishu") or not webhook:
             return
+        change = change or {}
         text = build_feishu_text(status, project.get("name") or project["id"], channel.get("name", ""), branch,
-                                 commit_sha, time.time() - started, message, self._manager_http_url())
+                                 commit_sha, time.time() - started, message, self._manager_http_url(),
+                                 feature_summary=change.get("summary", ""), commit_detail=change.get("raw", ""),
+                                 commit_stat=change.get("stat", ""), commit_count=change.get("count", 0),
+                                 change_note=change.get("note", ""))
         try:
             await asyncio.to_thread(send_feishu_text, webhook, text)
         except Exception as error:
@@ -310,9 +323,9 @@ class AgentService:
         self.executor.set_emitter(task["task_id"], lambda event: loop.call_soon_threadsafe(events.put_nowait, event))
         try:
             build_future = loop.run_in_executor(None, self.executor.run, task, project, channel, cancellation)
-            status, message, commit_sha = await self._consume_events(events, lambda event: self._send_event(socket_connection, event))
+            status, message, commit_sha, change = await self._consume_events(events, lambda event: self._send_event(socket_connection, event))
             await build_future
-            await self._notify(project, channel, task.get("branch", ""), commit_sha, status, message, started)
+            await self._notify(project, channel, task.get("branch", ""), commit_sha, status, message, started, change)
         finally:
             self.active_projects.discard(project["id"])
             self.task_cancellations.pop(task["task_id"], None)

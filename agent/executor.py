@@ -1,6 +1,7 @@
 """Unity AB build execution adapted from the existing asset_builder workflow."""
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -9,10 +10,14 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from agent.git import mainline_branch, merge_mainline, run_git, sync_branch
+from agent.git import current_revision, is_ancestor, mainline_branch, merge_mainline, revision_changes, run_git, sync_branch
 from agent.process import close_unity_for_project
 from agent.ticket import TICKET_MODULE, find_zip_name, is_release_channel, submit_ticket
 from shared.report import build_ai_report
+
+# 差异概括的 AI 调用超时与分析线程的等待上限（秒）。
+CHANGE_SUMMARY_TIMEOUT_SECONDS = 180
+CHANGE_SUMMARY_JOIN_TIMEOUT_SECONDS = 200
 
 
 class BuildExecutor:
@@ -29,6 +34,11 @@ class BuildExecutor:
         self.locks: dict[str, threading.Lock] = {}
         self.processes: dict[str, subprocess.Popen[Any]] = {}
         self.process_lock = threading.Lock()
+        # 差异概括线程按任务登记，打包结束后的分析线程会有界等待它们。
+        self.change_threads: dict[str, threading.Thread] = {}
+        self.change_lock = threading.Lock()
+        # 事件序号需要跨构建线程和概括线程保持唯一。
+        self.sequence_lock = threading.Lock()
 
     def set_emitter(self, task_id: str, emit: Callable[[dict[str, Any]], None]) -> None:
         """Register the event callback belonging to one running task."""
@@ -55,8 +65,11 @@ class BuildExecutor:
 
     def _event(self, task_id: str, kind: str, sequence: list[int], **data: Any) -> None:
         """Emit a monotonically numbered event for reconnect de-duplication."""
-        sequence[0] += 1
-        self._emit(task_id, {"task_id": task_id, "kind": kind, "sequence": sequence[0], **data})
+        # 概括线程与构建线程会并发上报，加锁保证序号唯一。
+        with self.sequence_lock:
+            sequence[0] += 1
+            number = sequence[0]
+        self._emit(task_id, {"task_id": task_id, "kind": kind, "sequence": number, **data})
 
     def _important_log(self, task_id: str, sequence: list[int], stage: str, line: str) -> None:
         """Forward actionable logs while dropping noisy file-by-file progress lines."""
@@ -105,11 +118,30 @@ class BuildExecutor:
             current_stage = "git"
             self._wait_before_next_stage()
             self._event(task_id, "status", sequence, stage=current_stage, message="syncing branch")
+            # release 渠道的飞书通知要带"自上次打包以来"的差异，先记录同步前基准。
+            track_changes = is_release_channel(channel) and bool(channel.get("notify_feishu"))
+            baseline_sha = ""
+            baseline_branch = ""
+            if track_changes:
+                try:
+                    baseline_branch, baseline_sha = current_revision(project["path"])
+                except Exception as error:
+                    # 基准读取失败不能影响构建，按无基准处理。
+                    self._event(task_id, "log", sequence, stage="git", message=f"读取差异基准失败：{error}")
+                if baseline_branch != task["branch"]:
+                    # 基准不属于本次分支（首次打包或刚切分支），无法比较，只保留分支名用于提示。
+                    baseline_sha = ""
             sha = sync_branch(project["path"], task["branch"], lambda line: self._important_log(task_id, sequence, "git", line))
             self._event(task_id, "status", sequence, stage="git", commit_sha=sha, message=f"checked out {sha}")
             # Optionally pull the updated mainline into a suffixed branch before packing it.
             if channel.get("sync_mainline"):
                 self._merge_mainline(task_id, project, task, sequence)
+            if track_changes:
+                try:
+                    self._collect_changes(task_id, project, sequence, baseline_branch, baseline_sha)
+                except Exception as error:
+                    # 差异说明属于附加信息，任何异常都不能影响构建结果。
+                    self._event(task_id, "log", sequence, stage="git", message=f"差异说明采集异常：{error}")
             current_stage = "xlua"
             self._wait_before_next_stage()
             self._clear_xlua_gen(project["path"], task_id, sequence)
@@ -133,6 +165,85 @@ class BuildExecutor:
                 self._start_failure_analysis(task_id, task_project, task, sequence, status="failed")
         finally:
             lock.release()
+
+    def _collect_changes(self, task_id: str, project: dict[str, Any], sequence: list[int], baseline_branch: str, baseline_sha: str) -> None:
+        """Report commits since the previous build and start the AI feature summary in background.
+
+        原始明细先立即上报，AI 概括在线程中补发，避免阻塞构建。
+        """
+        if not baseline_sha:
+            self._event(task_id, "diff", sequence, raw="", stat="", count=0, note=f"首次打包，无对比基准（上次分支：{baseline_branch or '未知'}）")
+            self._event(task_id, "diff_summary", sequence, summary="")
+            return
+        code, new_sha = run_git(project["path"], "rev-parse", "HEAD")
+        if code or not new_sha:
+            self._event(task_id, "diff", sequence, raw="", stat="", count=0, note="无法读取当前提交，已跳过差异说明")
+            self._event(task_id, "diff_summary", sequence, summary="")
+            return
+        if new_sha == baseline_sha:
+            self._event(task_id, "diff", sequence, raw="", stat="", count=0, note="本次打包无新增代码变更")
+            self._event(task_id, "diff_summary", sequence, summary="")
+            return
+        try:
+            detail, stat, total = revision_changes(project["path"], baseline_sha, new_sha)
+        except RuntimeError as error:
+            self._event(task_id, "diff", sequence, raw="", stat="", count=0, note=f"差异采集失败：{error}")
+            self._event(task_id, "diff_summary", sequence, summary="")
+            return
+        # 基准被强推或切换后可能不在当前历史中，明细仅供排查参考。
+        note = "" if is_ancestor(project["path"], baseline_sha, new_sha) else "基准提交不在当前历史，明细可能包含非本次引入的提交"
+        self._event(task_id, "diff", sequence, raw=detail, stat=stat, count=total, note=note)
+        thread = threading.Thread(target=self._summarize_changes, args=(task_id, project, detail, stat, total, sequence), name=f"ab2-changes-{task_id}", daemon=True)
+        with self.change_lock:
+            self.change_threads[task_id] = thread
+        thread.start()
+
+    def _summarize_changes(self, task_id: str, project: dict[str, Any], detail: str, stat: str, total: int, sequence: list[int]) -> None:
+        """Ask OpenCode to turn the commit detail into feature-level bullets for the notification."""
+        summary = ""
+        try:
+            executable = self._opencode_executable()
+            if not executable:
+                self._event(task_id, "log", sequence, stage="analysis", message="未找到 OpenCode CLI，已跳过差异概括")
+            else:
+                code_directory = Path(project["path"]) / "Assets" / "Editor" / "Main" / "BuildAPK" / "New"
+                if not code_directory.is_dir():
+                    code_directory = Path(project["path"]) / "Assets" / "Editor"
+                # 明细被截断时明确告知模型，避免它把截断当成完整列表。
+                truncate_hint = f"注意：提交明细已截断，仅包含最新 {len(detail.splitlines())} 条，共 {total} 条。\n" if total > len(detail.splitlines()) else ""
+                prompt = (
+                    "以下是某个 Unity 游戏项目本次打包相对上次打包的 Git 变更（已排除 merge 提交）：\n"
+                    f"{truncate_hint}{detail}\n"
+                    f"改动量：{stat or '未知'}\n"
+                    "请阅读后输出中文【本次重要功能变更】摘要，要求：3~8 条要点；合并同类改动，突出对玩家或业务可见的功能变化；"
+                    "忽略纯日志、注释、格式、路径调整等琐碎改动；如果确实没有重要功能变化，只输出\"无重要功能变更\"；"
+                    "只输出要点本身，不要前言、结语或代码块。只读分析，不要修改任何文件。"
+                )
+                output, exit_code, timed_out = self._run_opencode(executable, code_directory, prompt, CHANGE_SUMMARY_TIMEOUT_SECONDS)
+                if timed_out:
+                    self._event(task_id, "log", sequence, stage="analysis", message="OpenCode 差异概括超时，已终止概括进程")
+                final_text, event_count, text_count = self._parse_analysis_output(output)
+                if exit_code != 0 and not timed_out:
+                    self._event(task_id, "log", sequence, stage="analysis", message=f"OpenCode 差异概括失败，退出码 {exit_code}")
+                elif not final_text:
+                    self._event(task_id, "log", sequence, stage="analysis", message=f"OpenCode 未返回差异概括（事件 {event_count} 条，文本片段 {text_count} 个）")
+                summary = "\n".join(text.strip() for text in final_text if text.strip())
+        except Exception as error:
+            self._event(task_id, "log", sequence, stage="analysis", message=f"OpenCode 差异概括失败：{error}")
+        finally:
+            # 摘要先上报再摘除登记，保证等待方 join 后一定已经拿到事件。
+            self._event(task_id, "diff_summary", sequence, summary=summary)
+            with self.change_lock:
+                if self.change_threads.get(task_id) is threading.current_thread():
+                    self.change_threads.pop(task_id, None)
+
+    def _await_change_summary(self, task_id: str) -> None:
+        """Wait for the change-summary thread so the Feishu notification sees it in order."""
+        with self.change_lock:
+            thread = self.change_threads.pop(task_id, None)
+        if thread:
+            # 线程自身先摘除登记时说明摘要事件已经上报，无需等待。
+            thread.join(timeout=CHANGE_SUMMARY_JOIN_TIMEOUT_SECONDS)
 
     def _merge_mainline(self, task_id: str, project: dict[str, Any], task: dict[str, Any], sequence: list[int]) -> None:
         """Merge the updated origin mainline into a suffixed build branch."""
@@ -272,6 +383,37 @@ class BuildExecutor:
         )
         return [line.strip() for line in lines if any(pattern.search(line) for pattern in patterns)]
 
+    def _opencode_executable(self) -> str:
+        """Locate the OpenCode CLI and prefer its native executable on Windows."""
+        executable = shutil.which("opencode.cmd") if os.name == "nt" else shutil.which("opencode")
+        if not executable:
+            return ""
+        if os.name == "nt":
+            # opencode.cmd 只是包装脚本，底层原生 exe 才好捕获输出。
+            native_executable = Path(executable).parent / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
+            return str(native_executable) if native_executable.is_file() else executable
+        return executable
+
+    def _run_opencode(self, executable: str, code_directory: Path, prompt: str, timeout: int, log_path: str = "") -> tuple[str, int, bool]:
+        """Run one read-only OpenCode analysis and return its JSON stream, exit code, and timeout flag."""
+        command = [executable, "run", "--pure", "--dir", str(code_directory)]
+        if log_path:
+            command.extend(["--file", log_path])
+        command.extend(["--format", "json", prompt])
+        process = subprocess.Popen(command, cwd=str(code_directory), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
+        timed_out = False
+        try:
+            output, _ = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            if os.name == "nt":
+                # Windows 下 OpenCode 会拉起子进程，必须整棵进程树杀掉。
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True, text=True)
+            else:
+                process.kill()
+            output, _ = process.communicate()
+        return output, process.returncode, timed_out
+
     def _parse_analysis_output(self, output: str) -> tuple[list[str], int, int]:
         """Collect the OpenCode final answer from a JSON event stream of any CLI version.
 
@@ -367,7 +509,7 @@ class BuildExecutor:
             """Ask OpenCode to inspect the failed branch and Unity log, then stream its answer."""
             try:
                 self._event(task_id, "log", sequence, stage="analysis", message="__AB2_ANALYSIS_STARTED__")
-                executable = shutil.which("opencode.cmd") if __import__("os").name == "nt" else shutil.which("opencode")
+                executable = self._opencode_executable()
                 if not executable:
                     self._event(task_id, "log", sequence, stage="analysis", message="未找到 OpenCode CLI，已跳过自动分析")
                     return
@@ -380,23 +522,11 @@ class BuildExecutor:
                     "请优先读取并完整分析该日志，必要时查阅上述打包工具代码目录。只读分析，不要修改任何文件。"
                     "请直接用中文输出最终结论，明确说明是否成功；如果失败，给出根因、关键证据和建议修复步骤。Agent 会把最终回答生成 HTML 报告。"
                 )
-                if __import__("os").name == "nt":
-                    native_executable = Path(executable).parent / "node_modules" / "opencode-ai" / "bin" / "opencode.exe"
-                    executable = str(native_executable) if native_executable.is_file() else executable
-                command = [executable, "run", "--pure", "--dir", str(code_directory), "--file", project["log_path"], "--format", "json", prompt]
-                process = subprocess.Popen(command, cwd=str(code_directory), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
-                try:
-                    output, _ = process.communicate(timeout=600)
-                except subprocess.TimeoutExpired as timeout_error:
-                    if __import__("os").name == "nt":
-                        subprocess.run(["taskkill", "/F", "/T", "/PID", str(process.pid)], capture_output=True, text=True)
-                    else:
-                        process.kill()
-                    output, _ = process.communicate()
+                output, exit_code, timed_out = self._run_opencode(executable, code_directory, prompt, 600, project["log_path"])
+                if timed_out:
                     self._event(task_id, "log", sequence, stage="analysis", message="OpenCode 分析超时，已终止分析进程")
                 # 解析逻辑兼容新旧 OpenCode 版本，避免打包机版本不一致导致报告丢失
                 final_text, event_count, text_count = self._parse_analysis_output(output)
-                exit_code = process.returncode
                 if exit_code != 0:
                     self._event(task_id, "log", sequence, stage="analysis", message=f"OpenCode 分析失败，退出码 {exit_code}")
                 elif not final_text:
@@ -411,5 +541,7 @@ class BuildExecutor:
             except Exception as analysis_error:
                 self._event(task_id, "log", sequence, stage="analysis", message=f"OpenCode 分析失败：{analysis_error}")
             finally:
+                # 等差异概括线程结束，保证飞书通知能按顺序拿到它。
+                self._await_change_summary(task_id)
                 self._emit(task_id, {"task_id": task_id, "kind": "analysis_done"})
         threading.Thread(target=analyze, name=f"ab2-analysis-{task_id}", daemon=True).start()
