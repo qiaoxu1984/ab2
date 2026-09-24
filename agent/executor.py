@@ -269,6 +269,67 @@ class BuildExecutor:
         )
         return [line.strip() for line in lines if any(pattern.search(line) for pattern in patterns)]
 
+    def _parse_analysis_output(self, output: str) -> tuple[list[str], int, int]:
+        """Collect the OpenCode final answer from a JSON event stream of any CLI version.
+
+        Different build machines may run different OpenCode versions, so the parser must
+        not rely on provider-specific metadata:
+        - older versions tag the final answer with part.metadata.openai.phase == "final_answer";
+        - newer versions drop that metadata and only mark the final answer with a
+          step-finish event whose reason is "stop" and a matching messageID.
+        Returns the final text parts plus event and text counters for diagnostics.
+        """
+        # 旧版元数据标记的最终回答，优先级最高
+        tagged_final: list[str] = []
+        # 新版按 assistant 消息ID暂存文本，等待 step_finish 确认哪条消息才是最终回答
+        text_by_message: dict[str, list[str]] = {}
+        # 记录所有正常结束(reason=stop)的消息ID，最后一条即最终回答所在消息
+        stopped_messages: list[str] = []
+        event_count = 0
+        text_count = 0
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                # 非 JSON 噪音行（如启动提示）直接跳过
+                continue
+            event_count += 1
+            event_type = payload.get("type")
+            part = payload.get("part") or {}
+            if event_type == "text":
+                text = (part.get("text") or "").strip()
+                if not text:
+                    continue
+                text_count += 1
+                metadata = (part.get("metadata") or {}).get("openai") or {}
+                if metadata.get("phase") == "final_answer":
+                    tagged_final.append(text)
+                    continue
+                # 兼容 messageID/messageId 两种字段命名
+                message_id = str(part.get("messageID") or part.get("messageId") or "")
+                text_by_message.setdefault(message_id, []).append(text)
+            elif event_type in ("step_finish", "step-finish"):
+                if str(part.get("reason") or "") == "stop":
+                    message_id = str(part.get("messageID") or part.get("messageId") or "")
+                    if message_id:
+                        stopped_messages.append(message_id)
+        if tagged_final:
+            return tagged_final, event_count, text_count
+        # 兜底1：取最后一条正常结束消息的全部文本片段
+        # 兜底2：缺少 step_finish 时，取最后出现文本的消息
+        fallback_order = list(reversed(stopped_messages))
+        fallback_order += [message_id for message_id in reversed(list(text_by_message.keys())) if message_id and message_id not in stopped_messages]
+        for message_id in fallback_order:
+            texts = text_by_message.get(message_id) or []
+            if texts:
+                return texts, event_count, text_count
+        # 兜底3：事件中连消息ID都缺失时，只保留最后一段文本，避免把过程说明当成结论
+        all_texts = [text for texts in text_by_message.values() for text in texts]
+        return all_texts[-1:], event_count, text_count
+
     def _start_failure_analysis(self, task_id: str, project: dict[str, Any], task: dict[str, Any], sequence: list[int], status: str = "") -> None:
         """Start a read-only OpenCode build analysis without blocking the build worker.
 
@@ -296,8 +357,6 @@ class BuildExecutor:
                     executable = str(native_executable) if native_executable.is_file() else executable
                 command = [executable, "run", "--pure", "--dir", str(code_directory), "--file", project["log_path"], "--format", "json", prompt]
                 process = subprocess.Popen(command, cwd=str(code_directory), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
-                result_count = 0
-                final_text = []
                 try:
                     output, _ = process.communicate(timeout=600)
                 except subprocess.TimeoutExpired as timeout_error:
@@ -307,21 +366,14 @@ class BuildExecutor:
                         process.kill()
                     output, _ = process.communicate()
                     self._event(task_id, "log", sequence, stage="analysis", message="OpenCode 分析超时，已终止分析进程")
-                for line in output.splitlines():
-                    try:
-                        payload = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    part = payload.get("part", {})
-                    metadata = part.get("metadata", {}).get("openai", {})
-                    if payload.get("type") == "text" and metadata.get("phase") == "final_answer" and part.get("text"):
-                        result_count += 1
-                        final_text.append(part["text"].strip())
+                # 解析逻辑兼容新旧 OpenCode 版本，避免打包机版本不一致导致报告丢失
+                final_text, event_count, text_count = self._parse_analysis_output(output)
                 exit_code = process.returncode
                 if exit_code != 0:
                     self._event(task_id, "log", sequence, stage="analysis", message=f"OpenCode 分析失败，退出码 {exit_code}")
-                elif result_count == 0:
-                    self._event(task_id, "log", sequence, stage="analysis", message="OpenCode 未返回分析结果")
+                elif not final_text:
+                    # 记录事件统计，便于区分版本格式变化与模型未产出结论
+                    self._event(task_id, "log", sequence, stage="analysis", message=f"OpenCode 未返回分析结果（事件 {event_count} 条，文本片段 {text_count} 个）")
                 if final_text:
                     report_html = build_ai_report(status, "\n\n".join(final_text))
                     report_path = Path(project["path"]) / "AB2Reports" / f"{task_id}.html"
