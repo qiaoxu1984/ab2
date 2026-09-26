@@ -18,6 +18,15 @@ from shared.protocol import message
 from shared.report import build_ai_report
 
 
+def write_diff_report(event: dict[str, Any]) -> None:
+    """Materialize a change-notes page so the Feishu link opens immediately."""
+    report_dir = Path(os.getenv("AB2_DATA_DIR", "data")) / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    # 任务号由 Agent 生成（十六进制），Path.name 再次确保不越出报告目录。
+    file_name = Path(f"{event.get('task_id', '')}-diff.html").name
+    (report_dir / file_name).write_text(event.get("html", ""), encoding="utf-8")
+
+
 class AgentConnection:
     """Track one connected Agent socket and its latest registration."""
 
@@ -240,7 +249,10 @@ async def agent_socket(socket: WebSocket) -> None:
                 if agent_id:
                     state.db.register_task(data.get("task") or {}, agent_id)
             elif data.get("type") == "event":
-                state.db.apply_event(data["event"])
+                event = data["event"]
+                state.db.apply_event(event)
+                if event.get("kind") == "diff_report":
+                    write_diff_report(event)
     except WebSocketDisconnect:
         if agent_id and state.connections.get(agent_id) is connection:
             state.connections.pop(agent_id, None)

@@ -13,7 +13,7 @@ from typing import Any, Callable
 from agent.git import current_revision, is_ancestor, mainline_branch, merge_mainline, revision_changes, run_git, sync_branch
 from agent.process import close_unity_for_project
 from agent.ticket import TICKET_MODULE, find_zip_name, is_release_channel, submit_ticket
-from shared.report import build_ai_report
+from shared.report import build_ai_report, build_diff_report
 
 # 差异概括的 AI 调用超时与分析线程的等待上限（秒）。
 CHANGE_SUMMARY_TIMEOUT_SECONDS = 180
@@ -138,7 +138,7 @@ class BuildExecutor:
                 self._merge_mainline(task_id, project, task, sequence)
             if track_changes:
                 try:
-                    self._collect_changes(task_id, project, sequence, baseline_branch, baseline_sha)
+                    self._collect_changes(task_id, project, task, channel, sequence, baseline_branch, baseline_sha)
                 except Exception as error:
                     # 差异说明属于附加信息，任何异常都不能影响构建结果。
                     self._event(task_id, "log", sequence, stage="git", message=f"差异说明采集异常：{error}")
@@ -166,7 +166,7 @@ class BuildExecutor:
         finally:
             lock.release()
 
-    def _collect_changes(self, task_id: str, project: dict[str, Any], sequence: list[int], baseline_branch: str, baseline_sha: str) -> None:
+    def _collect_changes(self, task_id: str, project: dict[str, Any], task: dict[str, Any], channel: dict[str, Any], sequence: list[int], baseline_branch: str, baseline_sha: str) -> None:
         """Report commits since the previous build and start the AI feature summary in background.
 
         原始明细先立即上报，AI 概括在线程中补发，避免阻塞构建。
@@ -193,12 +193,21 @@ class BuildExecutor:
         # 基准被强推或切换后可能不在当前历史中，明细仅供排查参考。
         note = "" if is_ancestor(project["path"], baseline_sha, new_sha) else "基准提交不在当前历史，明细可能包含非本次引入的提交"
         self._event(task_id, "diff", sequence, raw=detail, stat=stat, count=total, note=note)
-        thread = threading.Thread(target=self._summarize_changes, args=(task_id, project, detail, stat, total, sequence), name=f"ab2-changes-{task_id}", daemon=True)
+        # 差异详情页上下文：AI 概括线程据此生成可分享的 HTML 页面。
+        context = {
+            "project_name": project.get("name") or project["id"],
+            "channel": channel.get("name", ""),
+            "branch": task.get("branch", ""),
+            "baseline_sha": baseline_sha,
+            "commit_sha": new_sha,
+            "note": note,
+        }
+        thread = threading.Thread(target=self._summarize_changes, args=(task_id, project, context, detail, stat, total, sequence), name=f"ab2-changes-{task_id}", daemon=True)
         with self.change_lock:
             self.change_threads[task_id] = thread
         thread.start()
 
-    def _summarize_changes(self, task_id: str, project: dict[str, Any], detail: str, stat: str, total: int, sequence: list[int]) -> None:
+    def _summarize_changes(self, task_id: str, project: dict[str, Any], context: dict[str, Any], detail: str, stat: str, total: int, sequence: list[int]) -> None:
         """Ask OpenCode to turn the commit detail into feature-level bullets for the notification."""
         summary = ""
         try:
@@ -233,6 +242,9 @@ class BuildExecutor:
         finally:
             # 摘要先上报再摘除登记，保证等待方 join 后一定已经拿到事件。
             self._event(task_id, "diff_summary", sequence, summary=summary)
+            # 差异详情页随通知一起提供，链接由 Agent 服务层拼成。
+            report_html = build_diff_report(context["project_name"], context["channel"], context["branch"], context["baseline_sha"], context["commit_sha"], summary, detail, stat, context["note"], total)
+            self._event(task_id, "diff_report", sequence, html=report_html)
             with self.change_lock:
                 if self.change_threads.get(task_id) is threading.current_thread():
                     self.change_threads.pop(task_id, None)

@@ -45,6 +45,9 @@ class Database:
                 CREATE TABLE IF NOT EXISTS reports (
                     task_id TEXT PRIMARY KEY, html TEXT NOT NULL, created_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS diff_reports (
+                    task_id TEXT PRIMARY KEY, html TEXT NOT NULL, created_at REAL NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_tasks_project_status
                     ON tasks(agent_id, project_id, status);
                 """
@@ -154,6 +157,9 @@ class Database:
                 )
             if event["kind"] == "report":
                 self.connection.execute("INSERT OR REPLACE INTO reports(task_id,html,created_at) VALUES(?,?,?)", (event["task_id"], event.get("html", ""), now))
+            if event["kind"] == "diff_report":
+                # 差异详情页独立存储，避免覆盖同一任务的 AI 分析报告。
+                self.connection.execute("INSERT OR REPLACE INTO diff_reports(task_id,html,created_at) VALUES(?,?,?)", (event["task_id"], event.get("html", ""), now))
             self.connection.execute(
                 """UPDATE tasks SET stage=CASE WHEN ?='status' THEN ? ELSE stage END, commit_sha=COALESCE(NULLIF(?,''),commit_sha),
                  error_code=COALESCE(NULLIF(?,''),error_code), error_message=COALESCE(NULLIF(?,''),error_message),
