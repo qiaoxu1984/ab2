@@ -4,6 +4,7 @@ import asyncio
 import os
 import secrets
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,35 @@ def write_diff_report(event: dict[str, Any]) -> None:
     # 任务号由 Agent 生成（十六进制），Path.name 再次确保不越出报告目录。
     file_name = Path(f"{event.get('task_id', '')}-diff.html").name
     (report_dir / file_name).write_text(event.get("html", ""), encoding="utf-8")
+
+
+# 任务超过该时长没有任何 Agent 事件即判定为孤儿任务，由看门狗兜底标记结束（秒）。
+STALE_TASK_SECONDS = 2 * 3600
+
+
+async def _stale_task_watchdog() -> None:
+    """Periodically close tasks whose Agent stopped reporting events.
+
+    Agent 正常断连时由 Agent 侧排队重发补上终态事件；这里只兜底 Agent 崩溃或
+    进程重启后永远不会再上报的任务，避免界面永久停在"执行中"。
+    """
+    while True:
+        await asyncio.sleep(60)
+        try:
+            cutoff = time.time() - STALE_TASK_SECONDS
+            for task in state.db.stale_tasks(cutoff):
+                # 保留原阶段信息，让界面仍能定位卡住的阶段。
+                state.db.apply_event({
+                    "kind": "status",
+                    "task_id": task["id"],
+                    "stage": task["stage"],
+                    "status": "failed",
+                    "error_code": "stale_task",
+                    "message": f"任务超过 {STALE_TASK_SECONDS // 3600} 小时无 Agent 事件，已由 Manager 标记结束",
+                })
+        except Exception as error:
+            # 看门狗自身异常不能中断后续检查。
+            print(f"stale task watchdog failed: {error}")
 
 
 class AgentConnection:
@@ -87,8 +117,18 @@ class ManagerState:
         )
 
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """启动后台看门狗，Manager 进程退出时随之取消。"""
+    watchdog = asyncio.create_task(_stale_task_watchdog())
+    try:
+        yield
+    finally:
+        watchdog.cancel()
+
+
 state = ManagerState()
-app = FastAPI(title="AB2 Build Manager")
+app = FastAPI(title="AB2 Build Manager", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 

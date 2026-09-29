@@ -21,6 +21,13 @@ from agent.git import run_git
 from agent.notify import build_feishu_text, send_feishu_text
 from agent.web import start_config_server
 
+# 心跳间隔（秒），维持原有频率，但 git 查询不再占用事件循环。
+HEARTBEAT_INTERVAL_SECONDS = 5
+# 分支列表缓存时长（秒）；心跳高频轮询时复用缓存，避免反复拉起 git 子进程。
+BRANCH_CACHE_SECONDS = 30
+# 事件发送失败后的重试间隔（秒），连接恢复前事件一直排队重发，保证终态不丢。
+EVENT_RETRY_SECONDS = 2
+
 
 def schedule_due(schedule: dict[str, Any], now: datetime) -> bool:
     """Return True when an enabled daily schedule matches the current minute."""
@@ -48,6 +55,9 @@ class AgentService:
         self.active_projects: set[str] = set()
         # Keep scheduled tasks in memory so a late Manager connection can still record them.
         self.local_tasks: dict[str, dict[str, Any]] = {}
+        # 分支列表缓存：key 为工程路径，value 为（缓存时间, 分支列表），降低心跳的 git 开销。
+        self.branch_cache: dict[str, tuple[float, list[str]]] = {}
+        self.branch_cache_lock = threading.Lock()
         self.executor = BuildExecutor(lambda event: None)
         self.task_cancellations: dict[str, threading.Event] = {}
         self.web_server = start_config_server(self.config, web_host, web_port, Path(__file__).with_name("config.html"))
@@ -65,9 +75,21 @@ class AgentService:
         return {"id": local_ip, "name": self.config.data["name"], "ip": local_ip, "platform": platform.system(), "hostname": socket.gethostname(), "version": "0.1.0", "projects": projects}
 
     def _branches(self, project: dict[str, Any]) -> list[str]:
-        """Return the local and remote branch names reported for one project."""
-        code, output = run_git(project["path"], "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes")
-        return sorted({line.removeprefix("origin/") for line in output.splitlines() if code == 0 and line.strip()})
+        """Return the local and remote branch names reported for one project.
+
+        分支列表只用于界面选择，心跳每几秒就会调用一次；短时间内的结果直接走缓存，
+        避免频繁拉起 git 子进程在打包重负载时拖慢事件循环。
+        """
+        project_path = project["path"]
+        with self.branch_cache_lock:
+            cached = self.branch_cache.get(project_path)
+        if cached and time.time() - cached[0] < BRANCH_CACHE_SECONDS:
+            return list(cached[1])
+        code, output = run_git(project_path, "for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes")
+        branches = sorted({line.removeprefix("origin/") for line in output.splitlines() if code == 0 and line.strip()})
+        with self.branch_cache_lock:
+            self.branch_cache[project_path] = (time.time(), branches)
+        return list(branches)
 
     def _local_ip(self) -> str:
         """Resolve the LAN address used as the stable Agent identity."""
@@ -132,16 +154,19 @@ class AgentService:
                 try:
                     async with connect(self.manager_url) as socket_connection:
                         self.socket = socket_connection
-                        await socket_connection.send(json.dumps({"type": "register", "agent": self.identity()}))
-                        self.connected = True
+                        # 身份信息里的分支列表要同步执行 git，放入线程避免阻塞事件循环漏回 keepalive。
+                        register_info = await asyncio.to_thread(self.identity)
+                        await socket_connection.send(json.dumps({"type": "register", "agent": register_info}))
                         # Scheduled builds that started before this connection must still be recorded.
                         await self._register_local_tasks(socket_connection)
+                        # 先完成定时任务登记再标记连接可用，防止事件重试早于任务注册被 Manager 丢弃。
+                        self.connected = True
                         await self._receive_loop(socket_connection)
                 except Exception as error:
                     print(f"Manager connection lost: {error}")
                     await asyncio.sleep(3)
                 finally:
-                    # Scheduled events are dropped rather than queued while the Manager is unreachable.
+                    # 断连后由 _send_event_reliable 负责排队重发，这里只标记连接不可用。
                     self.connected = False
         finally:
             scheduler.cancel()
@@ -195,7 +220,7 @@ class AgentService:
         self.executor.set_emitter(task["task_id"], lambda event: loop.call_soon_threadsafe(events.put_nowait, event))
         try:
             build_future = loop.run_in_executor(None, self.executor.run, task, project, channel, cancellation)
-            status, message, commit_sha, change = await self._consume_events(events, self._send_event_when_connected)
+            status, message, commit_sha, change = await self._consume_events(events)
             await build_future
             # Scheduled builds notify through the same channel switch as manual builds.
             await self._notify(project, channel, task.get("branch", ""), commit_sha, status, message, started, change, task["task_id"])
@@ -214,17 +239,25 @@ class AgentService:
                 # Stop retrying on a broken socket; the next connection tries again.
                 return
 
-    async def _send_event_when_connected(self, event: dict[str, Any]) -> None:
-        """Forward a scheduled-task event, dropping it while the Manager is offline."""
-        if not self.connected or self.socket is None:
-            return
-        try:
-            await self._send_event(self.socket, event)
-        except Exception:
-            # A dying socket must not abort the local scheduled build.
-            self.connected = False
+    async def _send_event_reliable(self, event: dict[str, Any]) -> None:
+        """Forward one task event on the current connection, retrying until it is delivered.
 
-    async def _consume_events(self, events: asyncio.Queue[dict[str, Any]], send: Any) -> tuple[str, str, str, dict[str, Any]]:
+        连接断开时事件绝不能丢：终态（success/failed）丢失会让任务在 Manager 上永久停在
+        "执行中"。这里始终取当前连接发送，失败则标记断开并等待重连后重发同一条事件，
+        事件顺序由调用方按队列顺序 await 保证。
+        """
+        while True:
+            socket = self.socket
+            if socket is not None and self.connected:
+                try:
+                    await self._send_event(socket, event)
+                    return
+                except Exception:
+                    # 发送失败说明这条旧连接已经失效，等待重连后重发。
+                    self.connected = False
+            await asyncio.sleep(EVENT_RETRY_SECONDS)
+
+    async def _consume_events(self, events: asyncio.Queue[dict[str, Any]]) -> tuple[str, str, str, dict[str, Any]]:
         """Forward build events until the terminal analysis event arrives.
 
         Returns the terminal (status, message, commit_sha) and the collected change summary.
@@ -240,7 +273,8 @@ class AgentService:
                 break
             if event.get("kind") == "diff_report":
                 change["report"] = True
-            await send(event)
+            # 逐条可靠发送，断线期间排队等待，保证终态事件最终一定送达。
+            await self._send_event_reliable(event)
             commit_sha = event.get("commit_sha") or commit_sha
             if event.get("kind") == "status" and event.get("status") in ("success", "failed", "cancelled"):
                 terminal_status = event.get("status", "")
@@ -278,8 +312,10 @@ class AgentService:
         async def heartbeat() -> None:
             """Send current identity periodically to update Manager liveness."""
             while True:
-                await asyncio.sleep(5)
-                await socket_connection.send(json.dumps({"type": "heartbeat", "agent": self.identity()}))
+                await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+                # git 查询必须移出事件循环线程：打包重负载时阻塞超过 20 秒会被 Manager 判 keepalive 超时断连。
+                agent_info = await asyncio.to_thread(self.identity)
+                await socket_connection.send(json.dumps({"type": "heartbeat", "agent": agent_info}))
 
         heartbeat_task = asyncio.create_task(heartbeat())
         try:
@@ -287,7 +323,8 @@ class AgentService:
                 data = json.loads(raw)
                 if data.get("type") == "config_project":
                     self.config.save_project(data["project"])
-                    await socket_connection.send(json.dumps({"type": "register", "agent": self.identity()}))
+                    # 保存配置后重新上报身份；git 查询同样放到线程，避免阻塞事件循环。
+                    await socket_connection.send(json.dumps({"type": "register", "agent": await asyncio.to_thread(self.identity)}))
                 elif data.get("type") == "build_task":
                     # Each project task gets its own worker while BuildExecutor shares project locks.
                     asyncio.create_task(self._start_task(socket_connection, data))
@@ -319,7 +356,8 @@ class AgentService:
         self.executor.set_emitter(task["task_id"], lambda event: loop.call_soon_threadsafe(events.put_nowait, event))
         try:
             build_future = loop.run_in_executor(None, self.executor.run, task, project, channel, cancellation)
-            status, message, commit_sha, change = await self._consume_events(events, lambda event: self._send_event(socket_connection, event))
+            # 事件始终走当前连接并带重试，连接在打包中途断开也不会丢掉终态。
+            status, message, commit_sha, change = await self._consume_events(events)
             await build_future
             await self._notify(project, channel, task.get("branch", ""), commit_sha, status, message, started, change, task["task_id"])
         finally:
@@ -355,7 +393,8 @@ class AgentService:
                 event = await events.get()
                 if event.get("kind") == "analysis_done":
                     break
-                await self._send_event(socket_connection, event)
+                # 主动分析同样依赖可靠发送，避免连接抖动导致分析日志丢失。
+                await self._send_event_reliable(event)
         finally:
             self.executor.clear_emitter(task_id)
 

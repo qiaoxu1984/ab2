@@ -31,7 +31,8 @@ class Database:
                     error_code TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '',
                  created_at REAL NOT NULL, started_at REAL, finished_at REAL,
                  cleared_at REAL,
-                    phase_times_json TEXT NOT NULL DEFAULT '{}'
+                    phase_times_json TEXT NOT NULL DEFAULT '{}',
+                    last_event_at REAL NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS logs (
                     task_id TEXT NOT NULL, sequence INTEGER NOT NULL, stage TEXT NOT NULL,
@@ -57,6 +58,9 @@ class Database:
                 self.connection.execute("ALTER TABLE tasks ADD COLUMN phase_times_json TEXT NOT NULL DEFAULT '{}'")
             if "cleared_at" not in columns:
                 self.connection.execute("ALTER TABLE tasks ADD COLUMN cleared_at REAL")
+            if "last_event_at" not in columns:
+                # 老库补列：看门狗据此判断任务是否还有事件上报（默认 0 表示从未收到事件）。
+                self.connection.execute("ALTER TABLE tasks ADD COLUMN last_event_at REAL NOT NULL DEFAULT 0")
 
     def create_task(self, request: dict[str, str]) -> str:
         """Atomically create a task unless its Agent/project already runs one."""
@@ -68,10 +72,11 @@ class Database:
             ).fetchone()
             if active:
                 raise ValueError(f"project already has active task {active['id']}")
+            now = time.time()
             self.connection.execute(
-                "INSERT INTO tasks(id,agent_id,project_id,channel,branch,status,created_at) VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO tasks(id,agent_id,project_id,channel,branch,status,created_at,last_event_at) VALUES(?,?,?,?,?,?,?,?)",
                 (task_id, request["agent_id"], request["project_id"], request["channel"],
-                 request["branch"], "queued", time.time()),
+                 request["branch"], "queued", now, now),
             )
         return task_id
 
@@ -81,10 +86,11 @@ class Database:
             return
         with self.lock, self.connection:
             # Repeated registration after a reconnect must not create a second row.
+            now = time.time()
             self.connection.execute(
-                "INSERT OR IGNORE INTO tasks(id,agent_id,project_id,channel,branch,status,created_at) VALUES(?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO tasks(id,agent_id,project_id,channel,branch,status,created_at,last_event_at) VALUES(?,?,?,?,?,?,?,?)",
                 (task["task_id"], agent_id, task.get("project_id", ""), task.get("channel", ""),
-                 task.get("branch", ""), "queued", time.time()),
+                 task.get("branch", ""), "queued", now, now),
             )
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
@@ -131,6 +137,19 @@ class Database:
             rows = self.connection.execute("SELECT * FROM tasks WHERE status IN ('queued','running')").fetchall()
         return [dict(row) for row in rows]
 
+    def stale_tasks(self, cutoff: float) -> list[dict[str, Any]]:
+        """Return active tasks whose last Agent event is older than the cutoff.
+
+        给 Manager 看门狗兜底用：Agent 崩溃/重启会让构建事件彻底消失，
+        没有这个筛选任务会永久停在"执行中"。
+        """
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT id, agent_id, project_id, channel, stage FROM tasks WHERE status IN ('queued','running','cancel_requested') AND last_event_at < ?",
+                (cutoff,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def apply_event(self, event: dict[str, Any]) -> None:
         """Apply an idempotent Agent event to task, log, and artifact tables."""
         now = time.time()
@@ -165,10 +184,10 @@ class Database:
                  error_code=COALESCE(NULLIF(?,''),error_code), error_message=COALESCE(NULLIF(?,''),error_message),
                  status=COALESCE(NULLIF(?,''),status), started_at=COALESCE(started_at,?),
                  finished_at=CASE WHEN ? IN ('success','failed','cancelled','unknown') THEN ? ELSE finished_at END,
-                 phase_times_json=? WHERE id=?""",
+                 last_event_at=?, phase_times_json=? WHERE id=?""",
                  (event.get("kind", ""), event.get("stage", ""), event.get("commit_sha", ""), event.get("error_code", ""),
                  event.get("message", "") if event.get("kind") == "status" else "",
-                  event.get("status", ""), now, event.get("status", ""), now, json.dumps(phase_times), event["task_id"]),
+                  event.get("status", ""), now, event.get("status", ""), now, now, json.dumps(phase_times), event["task_id"]),
             )
             for artifact in event.get("artifacts", []):
                 self.connection.execute(

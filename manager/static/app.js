@@ -176,7 +176,10 @@ function phaseDuration(task, phase) {
   if (!timing) return '';
   // Recover historical phase durations from the next phase when older events omitted finished_at.
   const phases = ['preflight', 'git', 'xlua', 'ab', 'analysis'];
-  const nextStart = phases.slice(phases.indexOf(phase) + 1).map(name => task.phase_times?.[name]?.started_at).find(Boolean);
+  // 差异概括会在打包中途写入 analysis 事件，早于当前阶段开始时间，不能当成本阶段结束时间。
+  const nextStart = phases.slice(phases.indexOf(phase) + 1)
+    .map(name => task.phase_times?.[name]?.started_at)
+    .find(start => start && start >= timing.started_at) || null;
   const terminalEnd = ['success', 'failed', 'cancelled', 'unknown'].includes(task.status) ? task.finished_at : null;
   const end = timing.finished_at || nextStart || terminalEnd || Date.now() / 1000;
   const seconds = Math.max(0, Math.round(end - timing.started_at));
