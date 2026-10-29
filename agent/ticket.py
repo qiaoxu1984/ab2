@@ -4,16 +4,17 @@
 在发布平台自动创建"客户端资源 / 定向环境"工单。
 """
 
+import getpass
 import os
 import platform
 import re
+import socket
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-# 需求约定：所有 release 渠道的工单固定参数，写死在代码里，不随项目/机器变化。
-TICKET_SUBMITTER = "qiaoxu"
+# 需求约定：工单的模块/备注等固定参数写死，提单人由项目配置决定。
 TICKET_MODULE = "byhls-客户端"
 TICKET_REMARK = "AB2 定向资源发布"
 
@@ -70,10 +71,24 @@ def binary_path() -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def submit_ticket(version: str) -> tuple[bool, str]:
+def current_submitter() -> str:
+    """Return the current system user name used when a project has no submitter.
+
+    项目配置里的提单人为空时回退到当前系统登录名；取不到登录名时再回退到机器名，
+    保证工单工具总能拿到一个非空的提交人。
+    """
+    try:
+        name = getpass.getuser().strip()
+    except (KeyError, OSError):
+        name = ""
+    return name or socket.gethostname().strip() or "unknown"
+
+
+def submit_ticket(version: str, submitter: str = "") -> tuple[bool, str]:
     """Run the autoApproval CLI for one release package and return success plus summary.
 
-    提交人/模块/备注以及服务类型/环境均为代码内固定值，只有版本号（包名）随构建变化。
+    模块/备注以及服务类型/环境均为代码内固定值，版本号（包名）随构建变化，
+    提单人优先使用项目配置，未配置时使用当前系统用户名。
     """
     executable = binary_path()
     if not executable:
@@ -86,7 +101,7 @@ def submit_ticket(version: str) -> tuple[bool, str]:
             pass
     command = [
         str(executable),
-        "-u", TICKET_SUBMITTER,
+        "-u", submitter.strip() or current_submitter(),
         "-p", TICKET_MODULE,
         "-v", version,
         "-t", TICKET_SERVICE_TYPE,

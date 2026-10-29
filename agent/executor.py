@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from agent.git import current_revision, is_ancestor, mainline_branch, merge_mainline, revision_changes, run_git, sync_branch
 from agent.process import close_unity_for_project
-from agent.ticket import TICKET_MODULE, find_zip_name, is_release_channel, submit_ticket
+from agent.ticket import TICKET_MODULE, current_submitter, find_zip_name, is_release_channel, submit_ticket
 from shared.report import build_ai_report, build_diff_report
 
 # 差异概括的 AI 调用超时与分析线程的等待上限（秒）。
@@ -154,7 +154,7 @@ class BuildExecutor:
             self._invoke_unity(task_id, task_project, channel["build_method"], sequence, self._agent_type(channel), cancel_event, current_stage, ab2_version)
             self._event(task_id, "log", sequence, stage="ab", message="generated Bundles/Diff/PackageManifest_DefaultPackage.version")
             self._event(task_id, "status", sequence, status="success", stage="ab", commit_sha=sha, message="build complete")
-            # 正式渠道构建成功后自动提交发布工单（同步执行，失败只记日志）。
+            # 正式渠道构建成功且项目开关打开时自动提交发布工单（同步执行，失败只记日志）。
             self._submit_release_ticket(task_id, task_project, channel, sequence)
             # Always start the AI analysis after the AB stage, including successful builds.
             self._start_failure_analysis(task_id, task_project, task, sequence, status="success")
@@ -497,13 +497,19 @@ class BuildExecutor:
             # 仅正式渠道建单；开发渠道直接跳过。
             if not is_release_channel(channel):
                 return
+            # 项目级开关：关闭后正式包也不再自动建单。
+            if not project.get("auto_ticket", True):
+                self._event(task_id, "log", sequence, stage="ticket", message="项目已关闭正式包自动建单，跳过建单")
+                return
             # 工单版本号使用 Unity 已上传 SVN 的资源包文件名。
             zip_name = find_zip_name(project["log_path"])
             if not zip_name:
                 self._event(task_id, "log", sequence, stage="ticket", message="构建日志中未找到资源包名，已跳过自动建单")
                 return
-            self._event(task_id, "log", sequence, stage="ticket", message=f"开始提交工单: {TICKET_MODULE} {zip_name}")
-            ok, summary = submit_ticket(zip_name)
+            # 提单人优先使用项目配置，未配置时使用当前系统用户名。
+            submitter = str(project.get("ticket_submitter") or "").strip() or current_submitter()
+            self._event(task_id, "log", sequence, stage="ticket", message=f"开始提交工单: {TICKET_MODULE} {zip_name}（提单人 {submitter}）")
+            ok, summary = submit_ticket(zip_name, submitter)
             if ok:
                 self._event(task_id, "log", sequence, stage="ticket", message=f"工单提交成功: {summary}")
             else:

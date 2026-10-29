@@ -38,6 +38,10 @@ class ProjectConfig(BaseModel):
     unity_path: str
     log_path: str
     default_branch: str = "main"
+    # Create the release O&M ticket automatically after successful release builds.
+    auto_ticket: bool = True
+    # Ticket submitter name; empty falls back to the current system user.
+    ticket_submitter: str = ""
     channels: list[ChannelConfig] = Field(default_factory=list)
 
 

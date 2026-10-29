@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.config import AgentConfig
+from agent.ticket import current_submitter
 
 
 class AgentWebHandler(BaseHTTPRequestHandler):
@@ -59,6 +60,8 @@ class AgentWebHandler(BaseHTTPRequestHandler):
             project["log_path"] = str(Path(project.get("path", "")) / "Log" / "AB2-build.log")
             project["unity_path"] = self._find_unity(project.get("unity_version", "")) or project.get("unity_path", "")
             project["engine"] = "Tuanjie" if "tuanjie" in project.get("unity_path", "").lower() else "Unity"
+            # Prefill the ticket submitter with the current system user when it is not configured yet.
+            project["ticket_submitter"] = str(project.get("ticket_submitter") or "").strip() or current_submitter()
             detected = self._detect_platforms(Path(project.get("path", "")))
             project["platforms"] = detected
             for channel in project.get("channels", []):
@@ -115,7 +118,7 @@ class AgentWebHandler(BaseHTTPRequestHandler):
             pass
         engine_path = self._find_unity(version)
         # Use the normalized full path as the project id so two same-named folders stay distinct.
-        return {"id": AgentConfig.project_id(str(path)), "name": path.name, "path": str(path), "unity_version": version, "engine": "Tuanjie" if engine_path and "tuanjie" in engine_path.lower() else "Unity", "platforms": self._detect_platforms(path), "unity_path": engine_path, "log_path": str(path / "Log" / "AB2-build.log"), "default_branch": branch, "channels": []}
+        return {"id": AgentConfig.project_id(str(path)), "name": path.name, "path": str(path), "unity_version": version, "engine": "Tuanjie" if engine_path and "tuanjie" in engine_path.lower() else "Unity", "platforms": self._detect_platforms(path), "unity_path": engine_path, "log_path": str(path / "Log" / "AB2-build.log"), "default_branch": branch, "auto_ticket": True, "ticket_submitter": current_submitter(), "channels": []}
 
     def _detect_platforms(self, project_path: Path) -> list[str]:
         """Read project settings and package metadata to determine configured platforms."""

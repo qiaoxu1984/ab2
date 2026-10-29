@@ -93,6 +93,11 @@ class AgentConfig:
                 raise ValueError("channel notify_feishu must be a boolean")
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.]*", channel.get("build_method", "")):
                 raise ValueError("invalid Unity build method")
+        # Optional release-ticket settings: switch on/off plus an optional submitter name.
+        if "auto_ticket" in project and not isinstance(project["auto_ticket"], bool):
+            raise ValueError("project auto_ticket must be a boolean")
+        if "ticket_submitter" in project and not isinstance(project["ticket_submitter"], str):
+            raise ValueError("project ticket_submitter must be a string")
         # Optional daily schedule: a boolean switch plus a local HH:MM trigger time.
         schedule = project.get("schedule") or {}
         if schedule:
