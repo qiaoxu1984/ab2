@@ -8,6 +8,8 @@ import re
 import socket
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +63,13 @@ class AgentService:
         self.executor = BuildExecutor(lambda event: None)
         self.task_cancellations: dict[str, threading.Event] = {}
         self.web_server = start_config_server(self.config, web_host, web_port, Path(__file__).with_name("config.html"))
+        # Manager 通过现有 WebSocket 转发配置页请求，Agent 只访问自己的回环地址。
+        bound_host, bound_port = self.web_server.server_address[:2]
+        if bound_host in ("", "0.0.0.0", "::"):
+            bound_host = "127.0.0.1"
+        if ":" in bound_host:
+            bound_host = f"[{bound_host}]"
+        self.web_base = f"http://{bound_host}:{bound_port}"
 
     def identity(self) -> dict[str, Any]:
         """Build the registration payload describing this machine and projects."""
@@ -72,7 +81,7 @@ class AgentService:
             # Return only the configured default branch when a channel uses the default filter.
             item["channel_branches"] = {channel["name"]: self._filter_branches(item["branches"], channel.get("branch_filter", "all_dev"), project.get("default_branch", "")) for channel in project.get("channels", [])}
             projects.append(item)
-        return {"id": local_ip, "name": self.config.data["name"], "ip": local_ip, "platform": platform.system(), "hostname": socket.gethostname(), "version": "0.1.0", "projects": projects}
+        return {"id": local_ip, "name": self.config.data["name"], "ip": local_ip, "platform": platform.system(), "hostname": socket.gethostname(), "version": "0.1.0", "capabilities": ["config_proxy"], "projects": projects}
 
     def _branches(self, project: dict[str, Any]) -> list[str]:
         """Return the local and remote branch names reported for one project.
@@ -336,6 +345,9 @@ class AgentService:
                     if cancellation:
                         cancellation.set()
                     self.executor.cancel(data["task_id"])
+                elif data.get("type") == "proxy_web":
+                    # 配置页代理放到独立任务，桌面文件夹对话框不会阻塞心跳和构建事件。
+                    asyncio.create_task(self._proxy_web_request(socket_connection, data))
         finally:
             heartbeat_task.cancel()
 
@@ -368,6 +380,37 @@ class AgentService:
     async def _send_event(self, socket_connection: Any, event: dict[str, Any]) -> None:
         """Send one task event using the protocol envelope."""
         await socket_connection.send(json.dumps({"type": "event", "event": event}))
+
+    async def _proxy_web_request(self, socket_connection: Any, command: dict[str, Any]) -> None:
+        """Fetch one local Agent-page request so the Manager can proxy it over the WebSocket."""
+        request_id = str(command.get("request_id", ""))
+        path = str(command.get("path") or "/")
+        if not path.startswith("/"):
+            path = "/" + path
+        method = "POST" if str(command.get("method", "GET")).upper() == "POST" else "GET"
+        body = str(command.get("body") or "")
+        headers = {str(key): str(value) for key, value in (command.get("headers") or {}).items()}
+
+        def fetch() -> dict[str, Any]:
+            """Call the Agent's loopback config server without blocking the event loop."""
+            request = urllib.request.Request(self.web_base + path, data=body.encode("utf-8") if body else None, method=method, headers=headers)
+            try:
+                with urllib.request.urlopen(request, timeout=120) as response:
+                    return {"status": response.status, "headers": {"Content-Type": response.headers.get("Content-Type", "")}, "body": response.read().decode("utf-8", errors="replace")}
+            except urllib.error.HTTPError as error:
+                # 4xx/5xx from the config server must reach the Manager page unchanged.
+                return {"status": error.code, "headers": {"Content-Type": error.headers.get("Content-Type", "") if error.headers else ""}, "body": error.read().decode("utf-8", errors="replace")}
+
+        try:
+            result = await asyncio.to_thread(fetch)
+        except Exception as error:
+            result = {"status": 502, "headers": {"Content-Type": "text/plain; charset=utf-8"}, "body": f"Agent 配置页响应失败：{error}"}
+        result.update({"type": "proxy_response", "request_id": request_id})
+        try:
+            await socket_connection.send(json.dumps(result, ensure_ascii=False))
+        except Exception:
+            # 连接已断开时无需重发，Manager 会按超时或断连回收请求。
+            pass
 
     async def _start_manual_analysis(self, socket_connection: Any, task: dict[str, Any]) -> None:
         """Run a fresh analysis for a finished task and stream it back to Manager."""

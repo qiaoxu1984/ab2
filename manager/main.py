@@ -1,16 +1,18 @@
 """FastAPI Manager for Agent registration, task dispatch, and log viewing."""
 
 import asyncio
+import json
 import os
 import secrets
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
 from manager.db import Database
@@ -30,6 +32,35 @@ def write_diff_report(event: dict[str, Any]) -> None:
 
 # 任务超过该时长没有任何 Agent 事件即判定为孤儿任务，由看门狗兜底标记结束（秒）。
 STALE_TASK_SECONDS = 2 * 3600
+# 配置页里的“选择工程文件夹”会在 Agent 桌面弹出系统对话框，预留较长的等待时间。
+CONFIG_PROXY_TIMEOUT_SECONDS = 120
+
+
+def inject_config_proxy(html: str, agent_id: str) -> str:
+    """Rewrite absolute config-page requests to the Manager's per-Agent proxy prefix."""
+    prefix = f"/agents/{quote(agent_id, safe='')}/config"
+    script = (
+        "<script>(function(){var p=" + json.dumps(prefix) + ";"
+        "var f=window.fetch.bind(window);"
+        "window.fetch=function(input,init){"
+        "if(typeof input==='string'){"
+        "if(input.charAt(0)==='/'){input=p+input;}"
+        "else if(!/^[a-z][a-z0-9+.-]*:|^\\/\\//i.test(input)){input=new URL(input,p+'/').toString();}"
+        "}"
+        "return f(input,init);};"
+        "var o=window.open.bind(window);"
+        "window.open=function(){var u=arguments[0];"
+        "if(typeof u==='string'){"
+        "if(u.charAt(0)==='/'){arguments[0]=p+u;}"
+        "else if(!/^[a-z][a-z0-9+.-]*:|^\\/\\//i.test(u)){arguments[0]=new URL(u,p+'/').toString();}"
+        "}"
+        "return o.apply(window,arguments);};"
+        "})();</script>"
+    )
+    # 注入到 <head> 末尾，保证 Agent 页面自身脚本执行前 fetch 已经指向 Manager 代理。
+    if "</head>" in html:
+        return html.replace("</head>", script + "</head>", 1)
+    return script + html
 
 
 async def _stale_task_watchdog() -> None:
@@ -64,6 +95,8 @@ class AgentConnection:
         """Initialize a connection wrapper around an accepted WebSocket."""
         self.socket = socket
         self.info: dict[str, Any] = {}
+        # 记录配置页代理请求，Agent 的响应按 request_id 唤醒对应的等待者。
+        self.pending: dict[str, asyncio.Future] = {}
 
 
 class ConfigRequest(BaseModel):
@@ -109,6 +142,42 @@ class ManagerState:
             raise HTTPException(status_code=409, detail="agent is offline")
         await connection.socket.send_json(payload)
 
+    async def proxy_web(self, agent_id: str, method: str, path: str, body: bytes, headers: dict[str, str]) -> dict[str, Any]:
+        """Forward one configuration-page request to the Agent and await its response."""
+        connection = self.connections.get(agent_id)
+        if not connection:
+            raise HTTPException(status_code=409, detail="agent is offline")
+        # 旧版 Agent 不认识 proxy_web，直接返回明确提示而不是等满超时。
+        if "config_proxy" not in (connection.info.get("capabilities") or []):
+            raise HTTPException(status_code=409, detail="Agent 版本过旧，请重启 Agent 后再打开配置页")
+        request_id = secrets.token_hex(8)
+        future = asyncio.get_running_loop().create_future()
+        connection.pending[request_id] = future
+        try:
+            try:
+                await connection.socket.send_json({
+                    "type": "proxy_web",
+                    "request_id": request_id,
+                    "method": method,
+                    "path": path,
+                    "body": body.decode("utf-8", errors="replace") if body else "",
+                    "headers": headers,
+                })
+            except Exception as error:
+                raise HTTPException(status_code=409, detail="agent is offline") from error
+            return await asyncio.wait_for(future, CONFIG_PROXY_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="Agent 配置页响应超时")
+        finally:
+            connection.pending.pop(request_id, None)
+
+    def close_pending(self, connection: AgentConnection) -> None:
+        """Fail every in-flight configuration request when an Agent disconnects."""
+        for future in connection.pending.values():
+            if not future.done():
+                future.set_exception(HTTPException(status_code=409, detail="agent is offline"))
+        connection.pending.clear()
+
     def live_agents(self) -> list[dict[str, Any]]:
         """Return only Agent data from currently connected WebSocket sessions."""
         return sorted(
@@ -136,6 +205,47 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 async def agents() -> list[dict[str, Any]]:
     """Return only currently connected Agents and their latest project configuration."""
     return state.live_agents()
+
+
+async def _proxy_config_request(agent_id: str, path: str, request: Request) -> Response:
+    """Proxy one Agent configuration page or API request through the live WebSocket."""
+    body = await request.body()
+    headers = {}
+    for name in ("content-type", "accept"):
+        value = request.headers.get(name)
+        if value:
+            headers[name.title()] = value
+    target = "/" + path
+    if request.url.query:
+        target += "?" + request.url.query
+    result = await state.proxy_web(agent_id, request.method, target, body, headers)
+    status = int(result.get("status") or 502)
+    response_headers = result.get("headers") or {}
+    content_type = str(response_headers.get("Content-Type") or response_headers.get("content-type") or "text/plain")
+    text = str(result.get("body") or "")
+    media_type = content_type.split(";", 1)[0].strip() or "text/plain"
+    if "text/html" in media_type:
+        text = inject_config_proxy(text, agent_id)
+    # Configuration pages must always reflect the Agent's current state instead of a browser cache.
+    return Response(content=text.encode("utf-8"), status_code=status, media_type=media_type, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/agents/{agent_id}/config")
+async def agent_config_redirect(agent_id: str) -> RedirectResponse:
+    """Keep the proxied page's relative URLs anchored under a trailing slash."""
+    return RedirectResponse(url=f"/agents/{quote(agent_id, safe='')}/config/", status_code=307)
+
+
+@app.api_route("/agents/{agent_id}/config/", methods=["GET", "POST"])
+async def agent_config_root(agent_id: str, request: Request) -> Response:
+    """Serve the Agent's configuration page through the Manager."""
+    return await _proxy_config_request(agent_id, "", request)
+
+
+@app.api_route("/agents/{agent_id}/config/{path:path}", methods=["GET", "POST"])
+async def agent_config_proxy(agent_id: str, path: str, request: Request) -> Response:
+    """Serve an Agent configuration asset or API endpoint through the Manager."""
+    return await _proxy_config_request(agent_id, path, request)
 
 
 @app.post("/api/projects")
@@ -293,9 +403,18 @@ async def agent_socket(socket: WebSocket) -> None:
                 state.db.apply_event(event)
                 if event.get("kind") == "diff_report":
                     write_diff_report(event)
+            elif data.get("type") == "proxy_response":
+                # The Agent answers configuration requests independently from heartbeat timing.
+                connection = state.connections.get(agent_id)
+                future = connection.pending.get(data.get("request_id", "")) if connection else None
+                if future and not future.done():
+                    future.set_result(data)
     except WebSocketDisconnect:
         if agent_id and state.connections.get(agent_id) is connection:
             state.connections.pop(agent_id, None)
+    finally:
+        # 连接结束（包括异常）必须唤醒仍在等待配置页响应的浏览器请求。
+        state.close_pending(connection)
 
 
 @app.get("/")

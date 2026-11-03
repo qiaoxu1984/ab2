@@ -90,7 +90,13 @@ async function loadAgents() {
        const buildType = getBuildType(channel);
        return `<div class="channel-card" data-build-type="${buildType}"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="channel-meta">资源版本：${esc(channel.ab2_version || '3800')}</div><div class="channel-actions"><select id="branch-${key}" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
     }).join('');
-    return `<details class="machine-group online" open><summary><span class="machine-name">${esc(agent.name)}</span><span class="machine-status">在线</span><span class="machine-meta">${esc(agent.hostname)} · ${esc(agent.platform)}</span></summary><div class="machine-channels">${cards || '暂无已配置渠道'}</div></details>`;
+    const configUrl = '/agents/' + encodeURIComponent(agent.id) + '/config/';
+    // Old Agents cannot serve the proxy request, so only offer a live link after they are restarted.
+    const configSupported = Array.isArray(agent.capabilities) && agent.capabilities.includes('config_proxy');
+    const configLink = configSupported
+      ? `<a class="machine-config" href="${esc(configUrl)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">配置</a>`
+      : '<span class="machine-config disabled" title="请重启该机器的 Agent 以启用远程配置">配置（需重启 Agent）</span>';
+    return `<details class="machine-group online" open><summary><span class="machine-name">${esc(agent.name)}</span><span class="machine-status">在线</span><span class="machine-meta">${esc(agent.hostname)} · ${esc(agent.platform)}</span>${configLink}</summary><div class="machine-channels">${cards || '暂无已配置渠道'}</div></details>`;
   }).join('') || '暂无已配置渠道';
     setBuildType(activeBuildType);
   }

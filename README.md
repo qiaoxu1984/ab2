@@ -33,7 +33,7 @@ On macOS, use the one-command launcher (make it executable once with `chmod +x s
 
 The launcher creates `.venv`, installs dependencies, starts the Agent and local control page, then opens `http://127.0.0.1:8010/`. It uses `ws://172.18.67.71:8000/ws/agent` by default and does not start a duplicate local Manager. Services already listening on ports 8000, 8010, or 8020 are reused. To run a local Manager instead, set `AB2_MANAGER_URL=ws://127.0.0.1:8000/ws/agent`; to force-start one, use `AB2_START_MANAGER=1`.
 
-The Agent configuration page is available at `http://127.0.0.1:8020/`. Add Unity projects and channels there. The project platform is read from the newest Unity `Library/PlayerDataCache` target directory and is read-only. Generated Unity logs are saved under `<project>/Log/AB2-build.log`. A channel requires a name, `SwitchTo` (`android_dev`, `android_release`, `ios_dev`, `ios_release`, `openharmony_dev`, or `openharmony_release`), and Unity build method. AB2 invokes `HLS_Editor.ExportEditor.BuildFromAB2` and passes the selected `SwitchTo` value as `-ab2Agent`. AB2 does not inspect or upload output files; the configured Unity method owns its default output behavior. The supported platform label is `OpenHarmony`.
+The Agent configuration page is available at `http://127.0.0.1:8020/`. Add Unity projects and channels there. Every online machine also shows a `配置` link on the Manager dashboard; the Manager proxies that Agent's local configuration page and its APIs through the existing Agent WebSocket, so port 8020 never needs to be reachable from the Manager browser. Restart the Manager and each Agent after upgrading; an old Agent is shown as `配置（需重启 Agent）` until it reports the new capability. Remote users should add projects with `浏览工程目录` (the Agent-side folder dialog is only usable on the Agent machine itself). The project platform is read from the newest Unity `Library/PlayerDataCache` target directory and is read-only. Generated Unity logs are saved under `<project>/Log/AB2-build.log`. A channel requires a name, `SwitchTo` (`android_dev`, `android_release`, `ios_dev`, `ios_release`, `openharmony_dev`, or `openharmony_release`), and Unity build method. AB2 invokes `HLS_Editor.ExportEditor.BuildFromAB2` and passes the selected `SwitchTo` value as `-ab2Agent`. AB2 does not inspect or upload output files; the configured Unity method owns its default output behavior. The supported platform label is `OpenHarmony`.
 
 The Agent page also accepts an optional `feishu_webhook` (a Feishu custom bot URL), and each channel has a `notify_feishu` switch. When a build finishes successfully or fails, and the switch is on, the Agent posts the result (project, channel, branch, commit, duration, failure reason) straight to that bot without depending on the Manager.
 
@@ -65,7 +65,7 @@ python -m agent.service --manager ws://172.18.67.71:8000/ws/agent --config data/
 
 5. 在 Manager 页面打开 `http://172.18.67.71:8000/`，刷新后即可看到远程 Agent。
 
-Agent 使用本机局域网 IP 作为 Manager 中的唯一 Agent ID，避免复制配置文件导致机器互相覆盖。远程 Agent 的配置页仍在它自己的机器上：`http://127.0.0.1:8020/`。当前版本适用于可信内网，尚未启用 Manager/Agent 身份认证，不要直接暴露到公网。
+Agent 使用本机局域网 IP 作为 Manager 中的唯一 Agent ID，避免复制配置文件导致机器互相覆盖。远程 Agent 的配置页也可以从 Manager 每台机器标题栏的“配置”入口打开（Manager 经 Agent 的 WebSocket 转发，Agent 无需暴露 8020）；在 Agent 本机仍可直接访问 `http://127.0.0.1:8020/`。当前版本适用于可信内网，尚未启用 Manager/Agent 身份认证，不要直接暴露到公网。
 
 ## 本机服务控制页
 
