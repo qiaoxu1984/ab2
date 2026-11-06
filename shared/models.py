@@ -64,6 +64,8 @@ class BuildRequest(BaseModel):
     project_id: str
     channel: str = ""
     branch: str
+    # Run the pre-release (预发布) flow: same pipeline, different Unity build entry point.
+    pre_release: bool = False
     # Carry the release unlock token; it is checked and stripped before dispatch.
     release_token: str = ""
 

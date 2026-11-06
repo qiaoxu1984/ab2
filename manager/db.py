@@ -29,6 +29,7 @@ class Database:
                     channel TEXT NOT NULL, branch TEXT NOT NULL, status TEXT NOT NULL,
                     stage TEXT NOT NULL DEFAULT '', commit_sha TEXT NOT NULL DEFAULT '',
                     error_code TEXT NOT NULL DEFAULT '', error_message TEXT NOT NULL DEFAULT '',
+                    pre_release INTEGER NOT NULL DEFAULT 0,
                  created_at REAL NOT NULL, started_at REAL, finished_at REAL,
                  cleared_at REAL,
                     phase_times_json TEXT NOT NULL DEFAULT '{}',
@@ -61,6 +62,9 @@ class Database:
             if "last_event_at" not in columns:
                 # 老库补列：看门狗据此判断任务是否还有事件上报（默认 0 表示从未收到事件）。
                 self.connection.execute("ALTER TABLE tasks ADD COLUMN last_event_at REAL NOT NULL DEFAULT 0")
+            if "pre_release" not in columns:
+                # 老库补列：历史任务一律视为正式打包，预发布标记只影响新任务。
+                self.connection.execute("ALTER TABLE tasks ADD COLUMN pre_release INTEGER NOT NULL DEFAULT 0")
 
     def create_task(self, request: dict[str, str]) -> str:
         """Atomically create a task unless its Agent/project already runs one."""
@@ -74,9 +78,9 @@ class Database:
                 raise ValueError(f"project already has active task {active['id']}")
             now = time.time()
             self.connection.execute(
-                "INSERT INTO tasks(id,agent_id,project_id,channel,branch,status,created_at,last_event_at) VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT INTO tasks(id,agent_id,project_id,channel,branch,status,created_at,last_event_at,pre_release) VALUES(?,?,?,?,?,?,?,?,?)",
                 (task_id, request["agent_id"], request["project_id"], request["channel"],
-                 request["branch"], "queued", now, now),
+                 request["branch"], "queued", now, now, int(bool(request.get("pre_release")))),
             )
         return task_id
 
@@ -88,9 +92,9 @@ class Database:
             # Repeated registration after a reconnect must not create a second row.
             now = time.time()
             self.connection.execute(
-                "INSERT OR IGNORE INTO tasks(id,agent_id,project_id,channel,branch,status,created_at,last_event_at) VALUES(?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO tasks(id,agent_id,project_id,channel,branch,status,created_at,last_event_at,pre_release) VALUES(?,?,?,?,?,?,?,?,?)",
                 (task["task_id"], agent_id, task.get("project_id", ""), task.get("channel", ""),
-                 task.get("branch", ""), "queued", now, now),
+                 task.get("branch", ""), "queued", now, now, int(bool(task.get("pre_release")))),
             )
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
@@ -103,6 +107,8 @@ class Database:
             artifacts = self.connection.execute("SELECT path,name,size,sha256 FROM artifacts WHERE task_id=?", (task_id,)).fetchall()
             report = self.connection.execute("SELECT 1 FROM reports WHERE task_id=?", (task_id,)).fetchone()
         result = dict(row)
+        # SQLite 没有布尔类型，接口统一回传真正的布尔值给前端。
+        result["pre_release"] = bool(result.get("pre_release"))
         result["phase_times"] = json.loads(result.pop("phase_times_json", "{}"))
         result["logs"] = [dict(item) for item in logs if not (item["stage"] == "analysis" and ("[0m" in item["message"] or item["message"].lstrip().startswith("> build")))]
         result["artifacts"] = [dict(item) for item in artifacts]

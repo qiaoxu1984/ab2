@@ -18,11 +18,13 @@ def format_duration(seconds: float) -> str:
 
 def build_feishu_text(status: str, project_name: str, channel: str, branch: str, commit_sha: str,
                       duration: float, error_message: str = "", manager_url: str = "",
-                      report_url: str = "") -> str:
+                      report_url: str = "", pre_release: bool = False) -> str:
     """Compose the build result text sent to the Feishu bot."""
     succeeded = status == "success"
+    # 预发布包不是正式发布，标题里明确区分，避免群里误以为是正式资源。
+    kind = "预发布打包" if pre_release else "打包"
     lines = [
-        f"【AB2 打包{'成功' if succeeded else '失败'}】",
+        f"【AB2 {kind}{'成功' if succeeded else '失败'}】",
         f"工程：{project_name}",
         f"渠道：{channel}",
         f"分支：{branch}",

@@ -19,6 +19,13 @@ from shared.report import build_ai_report, build_diff_report
 CHANGE_SUMMARY_TIMEOUT_SECONDS = 180
 CHANGE_SUMMARY_JOIN_TIMEOUT_SECONDS = 200
 
+# Unity 正式打包入口；预发布只替换这一步的 Unity 方法，其余阶段完全一致。
+BUILD_FROM_AB2_METHOD = "HLS_Editor.ExportEditor.BuildFromAB2"
+PREPARE_PUBLISH_METHOD = "HLS_Editor.ExportEditor.BuildPreparePublishFromAB2"
+# 预发布会把差异包内的版本清单改名，成功校验必须按对应的文件名检查。
+DIFF_MANIFEST_NAME = "PackageManifest_DefaultPackage.version"
+PREPARE_PUBLISH_DIFF_MANIFEST_NAME = "PackageManifest_DefaultPackage_preparepublish.version"
+
 
 class BuildExecutor:
     """Execute a configured branch/channel build and emit structured events."""
@@ -82,6 +89,12 @@ class BuildExecutor:
         if text and any(keyword in lowered for keyword in keywords):
             self._event(task_id, "log", sequence, stage=stage, message=text)
 
+    @staticmethod
+    def resolve_build_method(channel: dict[str, Any], pre_release: bool) -> str:
+        """Return the Unity AB entry point for a normal or pre-release build."""
+        # 预发布复用正式打包的全部阶段，只在 AB 阶段调用 Unity 的预发布函数。
+        return PREPARE_PUBLISH_METHOD if pre_release else channel["build_method"]
+
     def run(self, task: dict[str, Any], project: dict[str, Any], channel: dict[str, Any], cancel_event: threading.Event | None = None) -> None:
         """Run Git, channel switch, Unity build, log scan, and artifact verification."""
         task_id = task["task_id"]
@@ -103,8 +116,13 @@ class BuildExecutor:
                 raise RuntimeError("project path or Unity executable does not exist")
             if channel.get("switch_to", "").rsplit("_", 1)[-1] not in ("dev", "release"):
                 raise RuntimeError("switch_to must end with dev or release")
-            if not self.METHOD.fullmatch(channel["build_method"]):
+            # 预发布与正式打包走同一条流水线，仅 Unity AB 入口方法不同。
+            prepare_publish = bool(task.get("pre_release"))
+            build_method = self.resolve_build_method(channel, prepare_publish)
+            if not self.METHOD.fullmatch(build_method):
                 raise RuntimeError("invalid Unity build method name")
+            if prepare_publish:
+                self._event(task_id, "log", sequence, stage=current_stage, message=f"预发布模式：本次打包调用 {build_method}")
             # Enforce the configured default branch even if a Manager request was altered.
             if channel.get("branch_filter", "all_dev") == "default":
                 task["branch"] = project.get("default_branch", "")
@@ -151,8 +169,9 @@ class BuildExecutor:
             self._wait_before_next_stage()
             # Forward version 3800 by default while allowing a channel-specific override.
             ab2_version = channel.get("ab2_version") or "3800"
-            self._invoke_unity(task_id, task_project, channel["build_method"], sequence, self._agent_type(channel), cancel_event, current_stage, ab2_version)
-            self._event(task_id, "log", sequence, stage="ab", message="generated Bundles/Diff/PackageManifest_DefaultPackage.version")
+            self._invoke_unity(task_id, task_project, build_method, sequence, self._agent_type(channel), cancel_event, current_stage, ab2_version, prepare_publish=prepare_publish)
+            manifest_name = PREPARE_PUBLISH_DIFF_MANIFEST_NAME if prepare_publish else DIFF_MANIFEST_NAME
+            self._event(task_id, "log", sequence, stage="ab", message=f"generated Bundles/Diff/{manifest_name}")
             self._event(task_id, "status", sequence, status="success", stage="ab", commit_sha=sha, message="build complete")
             # 正式渠道构建成功且项目开关打开时自动提交发布工单（同步执行，失败只记日志）。
             self._submit_release_ticket(task_id, task_project, channel, sequence)
@@ -305,12 +324,14 @@ class BuildExecutor:
         diff_path.mkdir(parents=True, exist_ok=True)
         self._event(task_id, "log", sequence, stage="preflight", message=f"cleared Diff output: {diff_path}")
 
-    def _verify_diff_manifest(self, project_path: str) -> None:
+    def _verify_diff_manifest(self, project_path: str, prepare_publish: bool = False) -> None:
         """Require the current AB build to generate the DefaultPackage version manifest."""
         diff_path = Path(project_path) / "Bundles" / "Diff"
+        # 预发布会把差异包内的版本清单改名成 *_preparepublish.version，必须按对应名字校验。
+        expected = PREPARE_PUBLISH_DIFF_MANIFEST_NAME if prepare_publish else DIFF_MANIFEST_NAME
         # YooAsset places the manifest below a version directory, so search the fresh Diff tree recursively.
-        if not any(path.is_file() for path in diff_path.rglob("PackageManifest_DefaultPackage.version")):
-            raise RuntimeError(f"AB manifest was not generated under: {diff_path}")
+        if not any(path.is_file() and path.name == expected for path in diff_path.rglob("*.version")):
+            raise RuntimeError(f"AB manifest {expected} was not generated under: {diff_path}")
 
     def _clear_xlua_gen(self, project_path: str, task_id: str, sequence: list[int]) -> None:
         """Clear only the generated XLua directory before Unity regenerates it."""
@@ -332,7 +353,7 @@ class BuildExecutor:
         """Map the detected platform and switch type to the Unity proxy enum name."""
         return channel["switch_to"]
 
-    def _invoke_unity(self, task_id: str, project: dict[str, Any], method: str, sequence: list[int], agent_type: str = "", cancel_event: threading.Event | None = None, stage: str = "unity", ab2_version: str = "") -> None:
+    def _invoke_unity(self, task_id: str, project: dict[str, Any], method: str, sequence: list[int], agent_type: str = "", cancel_event: threading.Event | None = None, stage: str = "unity", ab2_version: str = "", prepare_publish: bool = False) -> None:
         """Invoke one configured Unity executeMethod and stream its output."""
         self._event(task_id, "status", sequence, stage=stage, message=f"execute {method}")
         command = [project["unity_path"], "-batchmode", "-projectPath", project["path"], "-executeMethod", method, "-logFile", project["log_path"]]
@@ -343,7 +364,7 @@ class BuildExecutor:
             # Unity exposes custom command-line values through Environment.GetCommandLineArgs().
             command.extend(["-ab2Agent", agent_type])
         # Forward an explicitly configured resource version only to the AB2 build command.
-        if method == "HLS_Editor.ExportEditor.BuildFromAB2" and ab2_version:
+        if method in (BUILD_FROM_AB2_METHOD, PREPARE_PUBLISH_METHOD) and ab2_version:
             command.extend(["-ab2Version", str(ab2_version)])
         Path(project["log_path"]).parent.mkdir(parents=True, exist_ok=True)
         # Do not wait for Unity's stdout pipe: Unity child processes can inherit it
@@ -369,7 +390,7 @@ class BuildExecutor:
             self.processes.pop(task_id, None)
         # AB success is defined by the fresh Diff manifest, not Unity's textual shutdown output.
         if stage == "ab":
-            self._verify_diff_manifest(project["path"])
+            self._verify_diff_manifest(project["path"], prepare_publish)
             return
         if exit_code != 0:
             raise RuntimeError(f"Unity method failed: {method}")

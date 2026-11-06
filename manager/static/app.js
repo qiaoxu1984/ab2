@@ -19,9 +19,12 @@ function esc(value) {
 }
 
 function setChannelAction(key, running) {
-  /* Hide the build action while this channel has an active task. */
+  /* Hide the build actions while this channel has an active task. */
   const build = document.querySelector('#build-' + key);
   if (build) build.style.display = running ? 'none' : '';
+  // 预发布按钮随正式打包一起隐藏，保证同一渠道同时只有一个任务。
+  const preRelease = document.querySelector('#pre-' + key);
+  if (preRelease) preRelease.style.display = running ? 'none' : '';
 }
 
 function getBuildType(channel) {
@@ -33,6 +36,17 @@ function getBuildType(channel) {
 function getVersion(channel) {
   /* Treat a missing resource version as the default 3800 like the channel card does. */
   return String(channel.ab2_version ?? '3800').trim() || '3800';
+}
+
+function preReleaseButton(key) {
+  /* Render the pre-release action only for channels whose SwitchTo ends with _release. */
+  if (!projectData[key]?.pre_release_available) return '';
+  return `<button id="pre-${key}" class="pre-release" onclick="buildProject('${key}', true)">预发布资源</button>`;
+}
+
+function idleChannelHtml(key, text = '未开始构建') {
+  /* Keep the pre-release action reachable while the channel has no task summary. */
+  return `<div class="channel-idle"><span>${esc(text)}</span><div class="task-actions">${preReleaseButton(key)}</div></div>`;
 }
 
 function versionOrder(version) {
@@ -131,10 +145,10 @@ async function loadAgents() {
       const usesDefaultBranch = channel.branch_filter === 'default';
       // The Agent sorts branches newest first, so a rebuilt card preselects the newest version.
       const selected = usesDefaultBranch ? (project.default_branch || branches[0] || '') : (branches[0] || '');
-      projectData[key] = { ...(projectData[key] || {}), agent_id: agent.id, project_id: project.id, channel: channelName, branch_filter: channel.branch_filter || 'all_dev', default_branch: project.default_branch || '' };
-       const buildType = getBuildType(channel);
-       const version = getVersion(channel);
-       return `<div class="channel-card" data-build-type="${buildType}" data-version="${esc(version)}"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="channel-meta">资源版本：${esc(version)}</div><div class="channel-actions"><select id="branch-${key}" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
+      const buildType = getBuildType(channel);
+      const version = getVersion(channel);
+      projectData[key] = { ...(projectData[key] || {}), agent_id: agent.id, project_id: project.id, channel: channelName, branch_filter: channel.branch_filter || 'all_dev', default_branch: project.default_branch || '', pre_release_available: buildType === 'release' };
+      return `<div class="channel-card" data-build-type="${buildType}" data-version="${esc(version)}"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="channel-meta">资源版本：${esc(version)}</div><div class="channel-actions"><select id="branch-${key}" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">${idleChannelHtml(key)}</div></div>`;
     }).join('');
     const configUrl = '/agents/' + encodeURIComponent(agent.id) + '/config/';
     // Old Agents cannot serve the proxy request, so only offer a live link after they are restarted.
@@ -170,13 +184,13 @@ async function restoreLatestTasks() {
   if (!selectedTask && newest) { selectedTask = newest.id; }
 }
 
-async function buildProject(key) {
+async function buildProject(key, preRelease = false) {
   /* Create a task using only the selected branch and Agent-side channel config. */
   const data = projectData[key];
   // Use the project default branch directly when the channel locks branch selection.
   const branch = data.branch_filter === 'default' ? data.default_branch : document.querySelector('#branch-' + key)?.value;
   if (!data || !branch) return;
-  const response = await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...data, branch, release_token: releaseToken }) });
+  const response = await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...data, branch, release_token: releaseToken, pre_release: Boolean(preRelease) }) });
   const result = await response.json();
   if (response.status === 403) {
     // The token expired (for example after a Manager restart); require the password again.
@@ -200,7 +214,7 @@ async function clearCurrentTask(key, taskId) {
   if (!response.ok) { showTaskMessage(key, '清除任务失败'); return; }
   delete projectData[key].task_id;
   const panel = document.querySelector('[data-channel-phase="' + key + '"]');
-  if (panel) { panel.textContent = '未开始构建'; delete panel.dataset.taskId; }
+  if (panel) { panel.innerHTML = idleChannelHtml(key); delete panel.dataset.taskId; }
 }
 
 async function triggerAiAnalysis(taskId) {
@@ -218,9 +232,9 @@ async function triggerAiAnalysis(taskId) {
 }
 
 function showTaskMessage(key, message) {
-  /* Show task errors in the corresponding channel panel. */
+  /* Show task errors in the corresponding channel panel without losing its actions. */
   const panel = document.querySelector('[data-channel-phase="' + key + '"]');
-  if (panel) panel.textContent = message;
+  if (panel) panel.innerHTML = idleChannelHtml(key, message);
 }
 
 function phaseDuration(task, phase) {
@@ -268,8 +282,9 @@ function taskHtml(task, key = '') {
     const detail = phase === 'analysis' && analysisDone ? `分析完成 <button class="report" onclick="openAiReport('${task.id}')">查看报告</button>${analysisAction}` : phase === 'analysis' && started ? `报告分析中...${analysisAction}` : state === 'success' ? '已完成' : state === 'failed' ? '失败' : phase === effectiveStage ? '执行中' : '未执行';
     return `<div class="phase ${state}"><b>${names[phase]}</b><span>${state === 'skipped' ? '已禁用' : state === 'pending' ? '未执行' : state === 'running' ? '执行中' : state === 'success' ? '成功' : '失败'}${phaseDuration(task, phase)}</span><small>${detail}</small></div>`;
   }).join('');
-    const clearButton = key ? ` <button class="clear-task" onclick="clearCurrentTask('${key}','${task.id}')">清除当前任务</button>` : '';
-    return `<div class="task-inline-head"><span>${task.status} · ${(phases.includes(task.stage) ? task.stage : task.status === 'failed' ? 'ab' : 'waiting')}</span></div><div class="phases">${cards}</div><div class="task-summary">开始时间：${esc(formatTaskTime(task.started_at))} · 完成时间：${esc(formatTaskTime(task.finished_at))}<br>分支：${esc(task.branch)} · Commit：${esc(task.commit_sha || '-')} ${clearButton}</div>`;
+    const clearButton = key ? `<button class="clear-task" onclick="clearCurrentTask('${key}','${task.id}')">清除当前任务</button>` : '';
+    const actions = `<div class="task-actions">${clearButton}${preReleaseButton(key)}</div>`;
+    return `<div class="task-inline-head"><span>${task.status} · ${(phases.includes(task.stage) ? task.stage : task.status === 'failed' ? 'ab' : 'waiting')}</span>${task.pre_release ? '<span class="pre-release-tag">预发布</span>' : ''}</div><div class="phases">${cards}</div><div class="task-summary"><div class="task-summary-text">开始时间：${esc(formatTaskTime(task.started_at))} · 完成时间：${esc(formatTaskTime(task.finished_at))}<br>分支：${esc(task.branch)} · Commit：${esc(task.commit_sha || '-')}</div>${actions}</div>`;
 }
 
 async function loadTask() {

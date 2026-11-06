@@ -295,7 +295,7 @@ class AgentService:
 
     async def _notify(self, project: dict[str, Any], channel: dict[str, Any], branch: str, commit_sha: str,
                       status: str, message: str, started: float, change: dict[str, Any] | None = None,
-                      task_id: str = "") -> None:
+                      task_id: str = "", pre_release: bool = False) -> None:
         """Send the Feishu notification for a finished build when the channel enables it."""
         webhook = str(self.config.data.get("feishu_webhook", "")).strip()
         if status not in ("success", "failed") or not channel.get("notify_feishu") or not webhook:
@@ -305,7 +305,7 @@ class AgentService:
         report_url = f"{self._manager_http_url()}reports/{task_id}-diff.html" if change.get("report") and task_id else ""
         text = build_feishu_text(status, project.get("name") or project["id"], channel.get("name", ""), branch,
                                  commit_sha, time.time() - started, message, self._manager_http_url(),
-                                 report_url=report_url)
+                                 report_url=report_url, pre_release=pre_release)
         try:
             await asyncio.to_thread(send_feishu_text, webhook, text)
         except Exception as error:
@@ -371,7 +371,7 @@ class AgentService:
             # 事件始终走当前连接并带重试，连接在打包中途断开也不会丢掉终态。
             status, message, commit_sha, change = await self._consume_events(events)
             await build_future
-            await self._notify(project, channel, task.get("branch", ""), commit_sha, status, message, started, change, task["task_id"])
+            await self._notify(project, channel, task.get("branch", ""), commit_sha, status, message, started, change, task["task_id"], pre_release=bool(task.get("pre_release")))
         finally:
             self.active_projects.discard(project["id"])
             self.task_cancellations.pop(task["task_id"], None)
