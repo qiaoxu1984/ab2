@@ -4,6 +4,8 @@ let lastTask = null;
 let lastAgentSnapshot = '';
 // Keep the selected build type in memory so refreshing Agent data preserves the active tab.
 let activeBuildType = 'dev';
+// Filter channel cards by the AB2 resource version while keeping Dev/Release independent.
+let activeVersion = 'all';
 const projectData = {};
 // Pin the shared packaging machine and the daily Android test project to the top.
 const FIRST_MACHINE_NAME = '公共打包机';
@@ -28,6 +30,60 @@ function getBuildType(channel) {
   return suffix === 'release' ? 'release' : 'dev';
 }
 
+function getVersion(channel) {
+  /* Treat a missing resource version as the default 3800 like the channel card does. */
+  return String(channel.ab2_version ?? '3800').trim() || '3800';
+}
+
+function versionOrder(version) {
+  /* Sort numeric resource versions ascending and leave any unusual labels last. */
+  const match = String(version).match(/\d+/);
+  return match ? Number(match[0]) : Number.MAX_SAFE_INTEGER;
+}
+
+function applyFilters() {
+  /* Apply both the Dev/Release tab and the resource-version filter to every channel. */
+  document.querySelectorAll('.machine-group').forEach(group => {
+    const cards = [...group.querySelectorAll('.channel-card')];
+    const matches = card => card.dataset.buildType === activeBuildType && (activeVersion === 'all' || card.dataset.version === activeVersion);
+    const visible = cards.some(matches);
+    group.hidden = !visible;
+    group.style.display = visible ? '' : 'none';
+    cards.forEach(card => {
+      // Explicit display control prevents the card's display:grid rule from overriding hidden.
+      const hidden = !matches(card);
+      card.hidden = hidden;
+      card.style.display = hidden ? 'none' : '';
+    });
+  });
+}
+
+function renderVersionFilter(agents) {
+  /* Show every resource version present on the dashboard plus the two defaults. */
+  const versions = new Set(['3800', '4200']);
+  agents.forEach(agent => (agent.projects || []).forEach(project => (project.channels || []).forEach(channel => versions.add(getVersion(channel)))));
+  if (activeVersion !== 'all' && !versions.has(activeVersion)) activeVersion = 'all';
+  const ordered = ['all', ...[...versions].sort((left, right) => versionOrder(left) - versionOrder(right) || left.localeCompare(right))];
+  const container = document.querySelector('#versionTabs');
+  if (!container) return;
+  container.innerHTML = ordered.map(version => {
+    const label = version === 'all' ? '全部' : version;
+    const selected = version === activeVersion;
+    return `<button class="version-tab${selected ? ' active' : ''}" data-version="${esc(version)}" aria-pressed="${selected}" onclick="setVersionFilter('${esc(version)}')">${esc(label)}</button>`;
+  }).join('');
+}
+
+function setVersionFilter(version) {
+  /* Switch the resource-version filter without discarding the selected Dev/Release tab. */
+  activeVersion = version || 'all';
+  document.querySelectorAll('.version-tab').forEach(tab => {
+    const selected = tab.dataset.version === activeVersion;
+    tab.classList.toggle('active', selected);
+    tab.setAttribute('aria-pressed', String(selected));
+  });
+  applyFilters();
+}
+
 async function setBuildType(buildType) {
   /* Switch between development and release channels without reloading the page. */
   const wanted = buildType === 'release' ? 'release' : 'dev';
@@ -48,18 +104,7 @@ async function setBuildType(buildType) {
     tab.classList.toggle('active', selected);
     tab.setAttribute('aria-selected', String(selected));
   });
-  document.querySelectorAll('.machine-group').forEach(group => {
-    const cards = [...group.querySelectorAll('.channel-card')];
-    const visible = cards.some(card => card.dataset.buildType === activeBuildType);
-    group.hidden = !visible;
-    group.style.display = visible ? '' : 'none';
-    cards.forEach(card => {
-      // Explicit display control prevents the card's display:grid rule from overriding hidden.
-      const hidden = card.dataset.buildType !== activeBuildType;
-      card.hidden = hidden;
-      card.style.display = hidden ? 'none' : '';
-    });
-  });
+  applyFilters();
 }
 
 async function loadAgents() {
@@ -88,7 +133,8 @@ async function loadAgents() {
       const selected = usesDefaultBranch ? (project.default_branch || branches[0] || '') : (branches[0] || '');
       projectData[key] = { ...(projectData[key] || {}), agent_id: agent.id, project_id: project.id, channel: channelName, branch_filter: channel.branch_filter || 'all_dev', default_branch: project.default_branch || '' };
        const buildType = getBuildType(channel);
-       return `<div class="channel-card" data-build-type="${buildType}"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="channel-meta">资源版本：${esc(channel.ab2_version || '3800')}</div><div class="channel-actions"><select id="branch-${key}" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
+       const version = getVersion(channel);
+       return `<div class="channel-card" data-build-type="${buildType}" data-version="${esc(version)}"><div class="channel-main"><div class="channel-title">${esc(channel.switch_to || channel.name || '未命名渠道')}</div><div class="project-title">${esc(project.name)}</div><div class="channel-meta">资源版本：${esc(version)}</div><div class="channel-actions"><select id="branch-${key}" ${usesDefaultBranch ? 'disabled' : ''}>${branches.map(branch => `<option value="${esc(branch)}" ${branch === selected ? 'selected' : ''}>${esc(branch)}</option>`).join('') || '<option value="">暂无符合条件的分支</option>'}</select><button id="build-${key}" onclick="buildProject('${key}')">打资源包</button></div></div><div class="channel-phase" data-channel-phase="${key}">未开始构建</div></div>`;
     }).join('');
     const configUrl = '/agents/' + encodeURIComponent(agent.id) + '/config/';
     // Old Agents cannot serve the proxy request, so only offer a live link after they are restarted.
@@ -98,6 +144,7 @@ async function loadAgents() {
       : '<span class="machine-config disabled" title="请重启该机器的 Agent 以启用远程配置">配置（需重启 Agent）</span>';
     return `<details class="machine-group online" open><summary><span class="machine-name">${esc(agent.name)}</span><span class="machine-status">在线</span><span class="machine-meta">${esc(agent.hostname)} · ${esc(agent.platform)}</span>${configLink}</summary><div class="machine-channels">${cards || '暂无已配置渠道'}</div></details>`;
   }).join('') || '暂无已配置渠道';
+    renderVersionFilter(agents);
     setBuildType(activeBuildType);
   }
   // Agent-side scheduled builds appear without any dashboard action, so always restore newest tasks.
