@@ -112,14 +112,15 @@ class AgentService:
             probe.close()
 
     @staticmethod
-    def _branch_version(branch: str) -> tuple[int, int, int]:
-        """Extract the numeric (year, month, day) version encoded in a branch name."""
-        match = re.match(r"(?:dev|feature)/(\d{1,2})-(\d{1,2})-(\d{2})", branch)
+    def _branch_version(branch: str) -> tuple[int, int, int, int]:
+        """Extract the numeric (year, month, day, hotfix) version encoded in a branch name."""
+        # 日期中的“日”允许带小数点，例如 dev/11-1.5-26；小数点后的数字参与排序。
+        match = re.match(r"(?:dev|feature)/(\d{1,2})-(\d{1,2})(?:\.(\d+))?-(\d{2})", branch)
         if not match:
             # Unparseable names sort behind every real version.
-            return (-1, -1, -1)
-        month, day, year = (int(part) for part in match.groups())
-        return (year, month, day)
+            return (-1, -1, -1, -1)
+        month, day, hotfix, year = match.groups()
+        return (int(year), int(month), int(day), int(hotfix or 0))
 
     def _filter_branches(self, branches: list[str], branch_filter: str, default_branch: str = "") -> list[str]:
         """Return the configured default branch or newest branches for the filter."""
@@ -135,7 +136,7 @@ class AgentService:
         allowed_months = {(((current_month_index - offset) // 12) % 100, (current_month_index - offset) % 12 + 1) for offset in range(3)}
         result = []
         for branch in branches:
-            match = re.fullmatch(r"(dev|feature)/(\d{1,2})-(\d{1,2})-(\d{2})(?:/.*)?", branch)
+            match = re.fullmatch(r"(dev|feature)/(\d{1,2})-(\d{1,2})(?:\.\d+)?-(\d{2})(?:/.*)?", branch)
             if not match:
                 continue
             kind, month, _, year = match.groups()

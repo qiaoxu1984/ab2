@@ -4,8 +4,9 @@ import re
 import subprocess
 from typing import Callable
 
-# A suffixed branch like dev/9-2-26_鸿蒙 carries its mainline as the date-encoded prefix.
-MAINLINE_PATTERN = re.compile(r"(?P<mainline>(?:dev|feature)/\d{1,2}-\d{1,2}-\d{2})(?P<suffix>.+)$")
+# A branch may carry several suffixes (dev/11-1-26_4200_鸿蒙); its parent is the name with only the last suffix removed.
+# 日期里的“日”允许带小数点（如 dev/11-1.5-26_4200），点号属于主线名而不是后缀。
+MAINLINE_PATTERN = re.compile(r"(?P<base>(?:dev|feature)/\d{1,2}-\d{1,2}(?:\.\d+)?-\d{2})(?P<suffix>.+)$")
 
 # 差异说明的采集上限：明细最多保留最新 80 条、总长不超过 6000 字符，避免飞书消息和 AI 提示词过长。
 MAX_CHANGE_COMMITS = 80
@@ -43,11 +44,20 @@ def sync_branch(project_path: str, branch: str, on_output: Callable[[str], None]
 
 
 def mainline_branch(branch: str) -> str:
-    """Return the mainline branch behind a suffixed branch name, or an empty string."""
+    """Return the parent branch of a suffixed branch name, or an empty string.
+
+    只去掉最后一级后缀：`dev/11-1-26_4200_鸿蒙` 的父分支是 `dev/11-1-26_4200`，
+    这样多级后缀可以逐级合并，而不是一步跳回日期主线。
+    """
     name = branch.strip()
     match = MAINLINE_PATTERN.fullmatch(name)
     # A plain mainline branch has no suffix and therefore nothing to merge.
-    return match.group("mainline") if match else ""
+    if not match:
+        return ""
+    suffix = match.group("suffix")
+    # 最后一个 _ 或 / 之后的部分是一级后缀，其余保留在父分支名里。
+    cut = max(suffix.rfind("_"), suffix.rfind("/"))
+    return match.group("base") + suffix[:cut] if cut > 0 else match.group("base")
 
 
 def merge_mainline(project_path: str, mainline: str, on_output: Callable[[str], None] | None = None) -> str:

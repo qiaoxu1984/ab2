@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent.git import current_revision, is_ancestor, revision_changes
+from agent.git import current_revision, is_ancestor, mainline_branch, revision_changes
 
 
 def run(command: list[str], cwd: str) -> str:
@@ -71,6 +71,42 @@ class GitChangeTests(unittest.TestCase):
         run(["checkout", "-B", "main", self.first], self.path)
         rewritten = commit(self.path, "rewritten")
         self.assertFalse(is_ancestor(self.path, second, rewritten))
+
+
+class MainlineBranchTests(unittest.TestCase):
+    """覆盖带后缀分支推导主线（父分支）的规则。"""
+
+    def test_suffixed_branch_returns_mainline(self) -> None:
+        """普通后缀（鸿蒙、资源版本）去掉后缀后即主线。"""
+        self.assertEqual("dev/9-2-26", mainline_branch("dev/9-2-26_鸿蒙"))
+        self.assertEqual("dev/11-1-26", mainline_branch("dev/11-1-26_4200"))
+
+    def test_dotted_day_branch_returns_mainline(self) -> None:
+        """日期中的日带小数点时，点号属于主线名而不是后缀。"""
+        self.assertEqual("dev/11-1.5-26", mainline_branch("dev/11-1.5-26_4200"))
+        self.assertEqual("dev/11-1.5-26", mainline_branch("dev/11-1.5-26_鸿蒙"))
+
+    def test_multiple_suffixes_drop_only_the_last_one(self) -> None:
+        """多级后缀只去掉最后一级，父分支保留前一级后缀。"""
+        self.assertEqual("dev/11-1-26_4200", mainline_branch("dev/11-1-26_4200_鸿蒙"))
+        self.assertEqual("dev/11-1.5-26_4200", mainline_branch("dev/11-1.5-26_4200_鸿蒙"))
+        self.assertEqual("dev/11-1-26_鸿蒙", mainline_branch("dev/11-1-26_鸿蒙_4200"))
+        self.assertEqual("feature/7-1-26/S35", mainline_branch("feature/7-1-26/S35/S36"))
+
+    def test_dotted_feature_branch_returns_mainline(self) -> None:
+        """feature 分支同样支持带点日期和斜杠后缀。"""
+        self.assertEqual("feature/7-1.5-26", mainline_branch("feature/7-1.5-26/S35赛季"))
+
+    def test_plain_mainline_has_no_parent(self) -> None:
+        """纯主线分支没有可合并的父分支。"""
+        self.assertEqual("", mainline_branch("dev/9-2-26"))
+        self.assertEqual("", mainline_branch("dev/11-1.5-26"))
+        self.assertEqual("", mainline_branch("main"))
+
+    def test_non_date_branch_has_no_parent(self) -> None:
+        """非日期命名的分支不推导主线。"""
+        self.assertEqual("", mainline_branch("dev/feature-x_4200"))
+        self.assertEqual("", mainline_branch("release/11-1.5-26_4200"))
 
 
 if __name__ == "__main__":
